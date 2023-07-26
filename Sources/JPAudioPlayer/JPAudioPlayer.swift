@@ -19,6 +19,7 @@ public enum JPAudioPlayerStatus {
 }
 
 public class JPAudioPlayer: NSObject, ObservableObject {
+  let playerItem: JPAudioPlayerItem
   var player: AVPlayer?
   var sessionController: JPAudioSessionController?
   let remoteCommandCenter: MPRemoteCommandCenter = MPRemoteCommandCenter.shared()
@@ -51,7 +52,17 @@ public class JPAudioPlayer: NSObject, ObservableObject {
     return playerStatus == .buffering || playerStatus == .playing
   }
   
+  public init(playerItem: JPAudioPlayerItem) {
+    self.playerItem = playerItem
+  }
+  
   deinit {
+  }
+  
+  public func startPlayer() {
+    if let streamURL = playerItem.playerItemType.streamURL {
+      startStreamAudio(url: streamURL)
+    }
   }
   
   public func startStreamAudio(url: URL) {

@@ -7,7 +7,7 @@
 
 import Foundation
 import AVFoundation
- 
+
 public protocol JPSessionControllerDelegate: AnyObject {
   func sessionControllerDidBeginInterruption()
   func sessionControllerDidEndInterruption(canResume: Bool)
@@ -24,9 +24,10 @@ public class JPAudioSessionController: NSObject {
   
   public func configure() throws {
 #if os(iOS)
-      let session = AVAudioSession.sharedInstance()
-      try session.setCategory(.playback)
-      try session.setMode(.spokenAudio)
+    let session = AVAudioSession.sharedInstance()
+    try session.setCategory(.playback)
+    try session.setMode(.spokenAudio)
+    try session.setActive(true)
     setupAudioSessionObservers()
 #endif
   }
