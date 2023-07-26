@@ -11,6 +11,8 @@ import AVFoundation
 public protocol JPSessionControllerDelegate: AnyObject {
   func sessionControllerDidBeginInterruption()
   func sessionControllerDidEndInterruption(canResume: Bool)
+  func sessionControllerRouteChangeOldDeviceNotAvailable()
+  func sessionControllerRouteChangeNewDeviceAvailable()
 }
 
 public class JPAudioSessionController: NSObject {
@@ -35,31 +37,51 @@ public class JPAudioSessionController: NSObject {
     let notificationCenter = NotificationCenter.default
     
     notificationCenter.addObserver(forName: AVAudioSession.interruptionNotification, object: session, queue: .main) { [weak self] notification in
-      print("interruption notification")
-      if let self, let userInfo = notification.userInfo, let type = userInfo[AVAudioSessionInterruptionTypeKey] as? NSNumber {
-        if let interruptionType = AVAudioSession.InterruptionType(rawValue: UInt(type.intValue)) {
-          switch interruptionType {
-            case .began:
-              self.sessionDelegate?.sessionControllerDidBeginInterruption()
-            case .ended:
-              if let canResume = userInfo[AVAudioSessionInterruptionOptionKey] as? NSNumber {
-                self.sessionDelegate?.sessionControllerDidEndInterruption(canResume: canResume.boolValue)
-              }
-            @unknown default:
-              fatalError()
-          }
-        }
+      if let self {
+        self.handleInterruption(notification: notification)
       }
     }
     
-    notificationCenter.addObserver(forName: AVAudioSession.routeChangeNotification, object: session, queue: .main) { notification in
-      print("route change notification")
+    notificationCenter.addObserver(forName: AVAudioSession.routeChangeNotification, object: session, queue: .main) { [weak self] notification in
+      if let self {
+        self.handleRouteChanges(notification: notification)
+      }
     }
     
     notificationCenter.addObserver(forName: AVAudioSession.mediaServicesWereLostNotification, object: session, queue: .main) { notification in
       
     }
 #endif
-
+  }
+  
+  private func handleInterruption(notification: Notification) {
+    if let userInfo = notification.userInfo, let type = userInfo[AVAudioSessionInterruptionTypeKey] as? NSNumber {
+      if let interruptionType = AVAudioSession.InterruptionType(rawValue: UInt(type.intValue)) {
+        switch interruptionType {
+          case .began:
+            sessionDelegate?.sessionControllerDidBeginInterruption()
+          case .ended:
+            if let canResume = userInfo[AVAudioSessionInterruptionOptionKey] as? NSNumber {
+              sessionDelegate?.sessionControllerDidEndInterruption(canResume: canResume.boolValue)
+            }
+          @unknown default:
+            fatalError()
+        }
+      }
+    }
+  }
+  
+  private func handleRouteChanges(notification: Notification) {
+    if let userInfo = notification.userInfo,
+       let reason = userInfo[AVAudioSessionRouteChangeReasonKey] as? NSNumber, let changeReason = AVAudioSession.RouteChangeReason(rawValue: reason.uintValue) {
+      switch changeReason {
+        case .newDeviceAvailable:
+          self.sessionDelegate?.sessionControllerRouteChangeNewDeviceAvailable()
+        case .oldDeviceUnavailable:
+          self.sessionDelegate?.sessionControllerRouteChangeOldDeviceNotAvailable()
+        default:
+          print("Route Change Notification \(changeReason)")
+      }
+    }
   }
 }

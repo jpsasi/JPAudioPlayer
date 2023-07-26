@@ -207,4 +207,12 @@ extension JPAudioPlayer: JPSessionControllerDelegate {
       stop()
     }
   }
+  
+  public func sessionControllerRouteChangeNewDeviceAvailable() {
+    play()
+  }
+  
+  public func sessionControllerRouteChangeOldDeviceNotAvailable() {
+    stop()
+  }
 }
