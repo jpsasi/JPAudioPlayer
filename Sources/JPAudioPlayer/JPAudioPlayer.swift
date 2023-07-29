@@ -67,6 +67,7 @@ public class JPAudioPlayer: NSObject, ObservableObject {
   
   public func startStreamAudio(url: URL) {
     let urlAsset = AVURLAsset(url: url)
+    urlAsset.resourceLoader.setDelegate(self, queue: .main)
     let playerItem = AVPlayerItem(asset: urlAsset)
     player = AVPlayer(playerItem: playerItem)
     sessionController = JPAudioSessionController()
@@ -225,5 +226,40 @@ extension JPAudioPlayer: JPSessionControllerDelegate {
   
   public func sessionControllerRouteChangeOldDeviceNotAvailable() {
     stop()
+  }
+}
+
+extension JPAudioPlayer : AVAssetResourceLoaderDelegate {
+  public func resourceLoader(_ resourceLoader: AVAssetResourceLoader, didCancel loadingRequest: AVAssetResourceLoadingRequest) {
+    print("didCancel")
+  }
+
+  public func resourceLoader(_ resourceLoader: AVAssetResourceLoader, shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest) -> Bool {
+    guard let requestURL = loadingRequest.request.url else {
+      loadingRequest.finishLoading(with: NSError(domain: "com.jpsasikumar", code: -1))
+      return false
+    }
+    let dataTask = URLSession.shared.dataTask(with: URLRequest(url: requestURL))
+    dataTask.delegate = self
+    dataTask.resume()
+    print("shouldWaitForLoadingOfRequestedResource \(loadingRequest)")
+    return true
+  }
+}
+
+extension JPAudioPlayer: URLSessionTaskDelegate {
+  public func urlSession(_ session: URLSession, didCreateTask task: URLSessionTask) {
+    print("urlSession didCreateTask")
+  }
+}
+
+extension JPAudioPlayer: URLSessionDataDelegate {
+  
+  public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+    print("urlSession didReceiveData \(data.count)")
+  }
+  
+  public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didBecome streamTask: URLSessionStreamTask) {
+    print("urlSession didBecomeStreamTask")
   }
 }
