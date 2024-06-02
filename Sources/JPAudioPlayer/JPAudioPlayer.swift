@@ -23,6 +23,13 @@ public class JPAudioPlayer: NSObject, ObservableObject {
   var player: AVPlayer?
   var sessionController: JPAudioSessionController?
   let remoteCommandCenter: MPRemoteCommandCenter = MPRemoteCommandCenter.shared()
+  var metaDataStreamContinuation: AsyncStream<String>.Continuation?
+  public lazy var metaDataStream: AsyncStream<String> = {
+    AsyncStream { (continuation: AsyncStream<String>.Continuation) -> Void in
+      self.metaDataStreamContinuation = continuation
+    }
+  }()
+  
   #if os(iOS)
   var nowPlayingSession: MPNowPlayingSession?
   #endif
@@ -186,6 +193,7 @@ extension JPAudioPlayer: AVPlayerItemMetadataOutputPushDelegate {
           if let title = item.value as? String {
             print("meta data \(title)")
             updateNowPlayingInfo(title: title)
+            self.metaDataStreamContinuation?.yield(title)
           }
         }
       }
