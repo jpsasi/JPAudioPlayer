@@ -1,6 +1,6 @@
 //
 //  JPAudioSessionHandler.swift
-//  
+//
 //
 //  Created by Sasikumar JP on 23/07/23.
 //
@@ -37,26 +37,30 @@ public class JPAudioSessionController: NSObject {
     let session = AVAudioSession.sharedInstance()
     let notificationCenter = NotificationCenter.default
     
-    notificationCenter.addObserver(forName: AVAudioSession.interruptionNotification, object: session, queue: .main) { [weak self] notification in
+    notificationCenter.addObserver(forName: AVAudioSession.interruptionNotification,
+                                   object: session, queue: .main) { [weak self] notification in
       if let self {
         self.handleInterruption(notification: notification)
       }
     }
     
-    notificationCenter.addObserver(forName: AVAudioSession.routeChangeNotification, object: session, queue: .main) { [weak self] notification in
+    notificationCenter.addObserver(forName: AVAudioSession.routeChangeNotification,
+                                   object: session,
+                                   queue: .main) { [weak self] notification in
       if let self {
         self.handleRouteChanges(notification: notification)
       }
     }
     
-    notificationCenter.addObserver(forName: AVAudioSession.mediaServicesWereLostNotification, object: session, queue: .main) { notification in
-      
+    notificationCenter.addObserver(forName: AVAudioSession.mediaServicesWereLostNotification, 
+                                   object: session, queue: .main) { notification in
     }
 #endif
   }
   
   private func handleInterruption(notification: Notification) {
-    if let userInfo = notification.userInfo, let type = userInfo[AVAudioSessionInterruptionTypeKey] as? NSNumber {
+    if let userInfo = notification.userInfo, 
+        let type = userInfo[AVAudioSessionInterruptionTypeKey] as? NSNumber {
       if let interruptionType = AVAudioSession.InterruptionType(rawValue: UInt(type.intValue)) {
         switch interruptionType {
           case .began:
@@ -74,7 +78,8 @@ public class JPAudioSessionController: NSObject {
   
   private func handleRouteChanges(notification: Notification) {
     if let userInfo = notification.userInfo,
-       let reason = userInfo[AVAudioSessionRouteChangeReasonKey] as? NSNumber, let changeReason = AVAudioSession.RouteChangeReason(rawValue: reason.uintValue) {
+       let reason = userInfo[AVAudioSessionRouteChangeReasonKey] as? NSNumber, 
+        let changeReason = AVAudioSession.RouteChangeReason(rawValue: reason.uintValue) {
       switch changeReason {
         case .newDeviceAvailable:
           self.sessionDelegate?.sessionControllerRouteChangeNewDeviceAvailable()

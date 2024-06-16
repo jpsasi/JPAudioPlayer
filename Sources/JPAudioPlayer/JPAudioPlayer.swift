@@ -189,13 +189,19 @@ extension JPAudioPlayer: AVPlayerItemMetadataOutputPushDelegate {
                              from track: AVPlayerItemTrack?) {
     for group in groups {
       for item in group.items {
-        if item.value is String {
-          if let title = item.value as? String {
-            print("meta data \(title)")
+        Task {
+          if let title = try await item.load(.value) as? String {
             updateNowPlayingInfo(title: title)
             self.metaDataStreamContinuation?.yield(title)
           }
         }
+//        if item.value is String {
+//          if let title = item.value as? String {
+//            print("meta data \(title)")
+//            updateNowPlayingInfo(title: title)
+//            self.metaDataStreamContinuation?.yield(title)
+//          }
+//        }
       }
     }
   }
