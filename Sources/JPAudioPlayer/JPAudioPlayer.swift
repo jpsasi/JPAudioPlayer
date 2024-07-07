@@ -175,6 +175,7 @@ public class JPAudioPlayer: NSObject, ObservableObject {
     remoteCommandCenter.nextTrackCommand.addTarget { [weak self] _ in
       if let nextPlayerItem = self?.playerDataSource?.audioPlayerNextPlayerItem() {
         self?.playerItem = nextPlayerItem
+        self?.play()
       }
       return .success
     }
@@ -182,6 +183,7 @@ public class JPAudioPlayer: NSObject, ObservableObject {
     remoteCommandCenter.previousTrackCommand.addTarget { [weak self] _ in
       if let prevPlayerItem = self?.playerDataSource?.audioPlayerPreviousPlayerItem() {
         self?.playerItem = prevPlayerItem
+        self?.play()
       }
       return .success
     }
