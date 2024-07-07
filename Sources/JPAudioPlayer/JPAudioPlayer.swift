@@ -103,17 +103,51 @@ public class JPAudioPlayer: NSObject, ObservableObject {
 #endif
   }
   
-  private func updateNowPlayingInfo(title: String = "") {
-    let nowPlayingInfo: [String:Any] = [
-      MPNowPlayingInfoPropertyIsLiveStream: true,
-      MPMediaItemPropertyAlbumTitle: "London Telugu Radio",
-      MPMediaItemPropertyTitle: title
-    ]
-    if let player, let playerItem = player.currentItem {
-      playerItem.nowPlayingInfo = nowPlayingInfo
-      
+  private func nowPlayingInfo(stream: Bool = true, 
+                              title: String,
+                              songTitle: String,
+                              artwork: MPMediaItemArtwork? = nil) -> [String:Any] {
+    let nowPlayingInfo:[String:Any] = if let artwork = artwork {
+      [
+        MPNowPlayingInfoPropertyIsLiveStream: true,
+        MPMediaItemPropertyAlbumTitle: title,
+        MPMediaItemPropertyTitle: songTitle,
+        MPMediaItemPropertyArtwork: artwork
+      ]
+    } else {
+      [
+        MPNowPlayingInfoPropertyIsLiveStream: true,
+        MPMediaItemPropertyAlbumTitle: title,
+        MPMediaItemPropertyTitle: songTitle
+      ]
     }
-    MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
+    return nowPlayingInfo
+  }
+  
+  private func updateNowPlayingInfo(metaData: String = "") {
+    guard let title = playerItem.playerItemType.title else { return }
+    Task {
+      let playingInfo: [String: Any]
+      if let thumbnailUrl = playerItem.playerItemType.thumbnailUrl {
+        let (data, _) = try await URLSession.shared.data(from: thumbnailUrl)
+        if let image = UIImage(data: data) {
+          let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in
+            return image
+          }
+          playingInfo = nowPlayingInfo(title: title, songTitle: metaData, artwork: artwork)
+        } else {
+          playingInfo = nowPlayingInfo(title: title, songTitle: metaData)
+        }
+      } else {
+        playingInfo = nowPlayingInfo(title: title, songTitle: metaData)
+      }
+      await MainActor.run {
+        if let player, let playerItem = player.currentItem {
+          playerItem.nowPlayingInfo = playingInfo
+        }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = playingInfo
+      }
+    }
   }
   
   private func activateRemoteControl() {
@@ -129,6 +163,14 @@ public class JPAudioPlayer: NSObject, ObservableObject {
     
     remoteCommandCenter.pauseCommand.addTarget { _ in
       self.pause()
+      return .success
+    }
+    
+    remoteCommandCenter.nextTrackCommand.addTarget { _ in
+      return .success
+    }
+    
+    remoteCommandCenter.previousTrackCommand.addTarget { _ in
       return .success
     }
 
@@ -191,7 +233,7 @@ extension JPAudioPlayer: AVPlayerItemMetadataOutputPushDelegate {
       for item in group.items {
         Task {
           if let title = try await item.load(.value) as? String {
-            updateNowPlayingInfo(title: title)
+            updateNowPlayingInfo(metaData: title)
             self.metaDataStreamContinuation?.yield(title)
           }
         }
