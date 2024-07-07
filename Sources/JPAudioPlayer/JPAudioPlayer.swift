@@ -18,15 +18,15 @@ public enum JPAudioPlayerStatus {
   case unknown
 }
 
-public protocol JPAudioPlayerDataSource: AnyObject {
-  func audioPlayerPreviousPlayerItem() -> JPAudioPlayerItem?
-  func audioPlayerNextPlayerItem() -> JPAudioPlayerItem?
+public protocol JPAudioPlayerDelegate: AnyObject {
+  func playNextStation()
+  func playPreviousStation()
 }
 
 public class JPAudioPlayer: NSObject, ObservableObject {
   var playerItem: JPAudioPlayerItem
   var player: AVPlayer?
-  public weak var playerDataSource: JPAudioPlayerDataSource?
+  public weak var playerDelegate: JPAudioPlayerDelegate?
   var sessionController: JPAudioSessionController?
   let remoteCommandCenter: MPRemoteCommandCenter = MPRemoteCommandCenter.shared()
   var metaDataStreamContinuation: AsyncStream<String>.Continuation?
@@ -173,18 +173,12 @@ public class JPAudioPlayer: NSObject, ObservableObject {
     }
     
     remoteCommandCenter.nextTrackCommand.addTarget { [weak self] _ in
-      if let nextPlayerItem = self?.playerDataSource?.audioPlayerNextPlayerItem() {
-        self?.playerItem = nextPlayerItem
-        self?.play()
-      }
+      self?.playerDelegate?.playNextStation()
       return .success
     }
     
     remoteCommandCenter.previousTrackCommand.addTarget { [weak self] _ in
-      if let prevPlayerItem = self?.playerDataSource?.audioPlayerPreviousPlayerItem() {
-        self?.playerItem = prevPlayerItem
-        self?.play()
-      }
+      self?.playerDelegate?.playPreviousStation()
       return .success
     }
   }
