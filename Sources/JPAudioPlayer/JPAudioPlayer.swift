@@ -117,14 +117,14 @@ public class JPAudioPlayer: NSObject, ObservableObject {
       [
         MPNowPlayingInfoPropertyIsLiveStream: true,
         MPMediaItemPropertyAlbumTitle: title,
-        MPMediaItemPropertyTitle: songTitle,
+        MPMediaItemPropertyTitle: !songTitle.isEmpty ? songTitle : title,
         MPMediaItemPropertyArtwork: artwork
       ]
     } else {
       [
         MPNowPlayingInfoPropertyIsLiveStream: true,
         MPMediaItemPropertyAlbumTitle: title,
-        MPMediaItemPropertyTitle: songTitle
+        MPMediaItemPropertyTitle: !songTitle.isEmpty ? songTitle : title,
       ]
     }
     return nowPlayingInfo
