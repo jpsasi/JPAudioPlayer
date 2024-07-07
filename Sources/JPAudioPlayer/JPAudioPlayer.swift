@@ -18,9 +18,15 @@ public enum JPAudioPlayerStatus {
   case unknown
 }
 
+public protocol JPAudioPlayerDataSource: AnyObject {
+  func audioPlayerPreviousPlayerItem() -> JPAudioPlayerItem?
+  func audioPlayerNextPlayerItem() -> JPAudioPlayerItem?
+}
+
 public class JPAudioPlayer: NSObject, ObservableObject {
-  let playerItem: JPAudioPlayerItem
+  var playerItem: JPAudioPlayerItem
   var player: AVPlayer?
+  weak var playerDataSource: JPAudioPlayerDataSource?
   var sessionController: JPAudioSessionController?
   let remoteCommandCenter: MPRemoteCommandCenter = MPRemoteCommandCenter.shared()
   var metaDataStreamContinuation: AsyncStream<String>.Continuation?
@@ -151,29 +157,34 @@ public class JPAudioPlayer: NSObject, ObservableObject {
   }
   
   private func activateRemoteControl() {
-    remoteCommandCenter.playCommand.addTarget { _ in
-      self.play()
+    remoteCommandCenter.playCommand.addTarget { [weak self] _ in
+      self?.play()
       return .success
     }
     
-    remoteCommandCenter.stopCommand.addTarget { _ in
-      self.stop()
+    remoteCommandCenter.stopCommand.addTarget { [weak self] _ in
+      self?.stop()
       return .success
     }
     
-    remoteCommandCenter.pauseCommand.addTarget { _ in
-      self.pause()
+    remoteCommandCenter.pauseCommand.addTarget { [weak self] _ in
+      self?.pause()
       return .success
     }
     
-    remoteCommandCenter.nextTrackCommand.addTarget { _ in
+    remoteCommandCenter.nextTrackCommand.addTarget { [weak self] _ in
+      if let nextPlayerItem = self?.playerDataSource?.audioPlayerNextPlayerItem() {
+        self?.playerItem = nextPlayerItem
+      }
       return .success
     }
     
-    remoteCommandCenter.previousTrackCommand.addTarget { _ in
+    remoteCommandCenter.previousTrackCommand.addTarget { [weak self] _ in
+      if let prevPlayerItem = self?.playerDataSource?.audioPlayerPreviousPlayerItem() {
+        self?.playerItem = prevPlayerItem
+      }
       return .success
     }
-
   }
   
   public func play() {
