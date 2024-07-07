@@ -26,7 +26,7 @@ public protocol JPAudioPlayerDataSource: AnyObject {
 public class JPAudioPlayer: NSObject, ObservableObject {
   var playerItem: JPAudioPlayerItem
   var player: AVPlayer?
-  weak var playerDataSource: JPAudioPlayerDataSource?
+  public weak var playerDataSource: JPAudioPlayerDataSource?
   var sessionController: JPAudioSessionController?
   let remoteCommandCenter: MPRemoteCommandCenter = MPRemoteCommandCenter.shared()
   var metaDataStreamContinuation: AsyncStream<String>.Continuation?
