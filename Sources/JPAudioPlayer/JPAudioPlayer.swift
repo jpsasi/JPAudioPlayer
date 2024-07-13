@@ -23,23 +23,19 @@ public protocol JPAudioPlayerDelegate: AnyObject {
   func playPreviousStation()
 }
 
-public class JPAudioPlayer: NSObject, ObservableObject {
+@Observable
+public class JPAudioPlayer: NSObject {
   var playerItem: JPAudioPlayerItem
   var player: AVPlayer?
   public weak var playerDelegate: JPAudioPlayerDelegate?
   var sessionController: JPAudioSessionController?
   let remoteCommandCenter: MPRemoteCommandCenter = MPRemoteCommandCenter.shared()
-  var metaDataStreamContinuation: AsyncStream<String>.Continuation?
-  public lazy var metaDataStream: AsyncStream<String> = {
-    AsyncStream { (continuation: AsyncStream<String>.Continuation) -> Void in
-      self.metaDataStreamContinuation = continuation
-    }
-  }()
+  public var metaData: String = ""
   
   #if os(iOS)
   var nowPlayingSession: MPNowPlayingSession?
   #endif
-  @Published public var playerStatus: JPAudioPlayerStatus = .notInitialized
+  public var playerStatus: JPAudioPlayerStatus = .notInitialized
   public var statusString: String {
     switch playerStatus {
       case .notInitialized:
@@ -58,7 +54,7 @@ public class JPAudioPlayer: NSObject, ObservableObject {
         return "Unknown"
     }
   }
-  @Published var title: String = ""
+  var title: String = ""
   private static var playerItemContext = 0
   
   public var isPlaying: Bool {
@@ -132,6 +128,7 @@ public class JPAudioPlayer: NSObject, ObservableObject {
   
   private func updateNowPlayingInfo(metaData: String = "") {
     guard let title = playerItem.playerItemType.title else { return }
+    self.metaData = metaData
     Task {
       let playingInfo: [String: Any]
       if let thumbnailUrl = playerItem.playerItemType.thumbnailUrl {
@@ -241,7 +238,6 @@ extension JPAudioPlayer: AVPlayerItemMetadataOutputPushDelegate {
         Task {
           if let title = try await item.load(.value) as? String {
             updateNowPlayingInfo(metaData: title)
-            self.metaDataStreamContinuation?.yield(title)
           }
         }
 //        if item.value is String {
