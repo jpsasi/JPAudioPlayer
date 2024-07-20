@@ -181,7 +181,7 @@ public class JPAudioPlayer: NSObject {
   }
   
   public func play() {
-    player?.play()
+    startPlayer()
   }
   
   public func pause() {
@@ -191,6 +191,7 @@ public class JPAudioPlayer: NSObject {
   
   public func stop() {
     player?.pause()
+    player?.replaceCurrentItem(with: nil)
     playerStatus = .stopped
   }
   
