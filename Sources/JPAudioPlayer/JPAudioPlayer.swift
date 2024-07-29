@@ -56,13 +56,14 @@ public class JPAudioPlayer: NSObject {
   }
   var title: String = ""
   private static var playerItemContext = 0
-  
+  private let thumbnailImage: UIImage
   public var isPlaying: Bool {
     return playerStatus == .buffering || playerStatus == .playing
   }
   
-  public init(playerItem: JPAudioPlayerItem) {
+  public init(playerItem: JPAudioPlayerItem, thumbnailImage: UIImage) {
     self.playerItem = playerItem
+    self.thumbnailImage = thumbnailImage
   }
   
   deinit {
@@ -139,10 +140,16 @@ public class JPAudioPlayer: NSObject {
           }
           playingInfo = nowPlayingInfo(title: title, songTitle: metaData, artwork: artwork)
         } else {
-          playingInfo = nowPlayingInfo(title: title, songTitle: metaData)
+          let artwork = MPMediaItemArtwork(boundsSize: thumbnailImage.size) { _ in
+            return self.thumbnailImage
+          }
+          playingInfo = nowPlayingInfo(title: title, songTitle: metaData, artwork: artwork)
         }
       } else {
-        playingInfo = nowPlayingInfo(title: title, songTitle: metaData)
+        let artwork = MPMediaItemArtwork(boundsSize: thumbnailImage.size) { _ in
+          return self.thumbnailImage
+        }
+        playingInfo = nowPlayingInfo(title: title, songTitle: metaData, artwork: artwork)
       }
       await MainActor.run {
         if let player, let playerItem = player.currentItem {
