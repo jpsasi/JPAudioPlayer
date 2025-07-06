@@ -56,12 +56,12 @@ public class JPAudioPlayer: NSObject {
   }
   var title: String = ""
   private static var playerItemContext = 0
-  private let thumbnailImage: UIImage
+  private let thumbnailImage: UIImage?
   public var isPlaying: Bool {
     return playerStatus == .buffering || playerStatus == .playing
   }
   
-  public init(playerItem: JPAudioPlayerItem, thumbnailImage: UIImage) {
+  public init(playerItem: JPAudioPlayerItem, thumbnailImage: UIImage? = nil) {
     self.playerItem = playerItem
     self.thumbnailImage = thumbnailImage
   }
@@ -131,7 +131,7 @@ public class JPAudioPlayer: NSObject {
     guard let title = playerItem.playerItemType.title else { return }
     self.metaData = metaData
     Task {
-      let playingInfo: [String: Any]
+      var playingInfo: [String: Any] = [:]
       if let thumbnailUrl = playerItem.playerItemType.thumbnailUrl {
         let (data, _) = try await URLSession.shared.data(from: thumbnailUrl)
         if let image = UIImage(data: data) {
@@ -139,23 +139,24 @@ public class JPAudioPlayer: NSObject {
             return image
           }
           playingInfo = nowPlayingInfo(title: title, songTitle: metaData, artwork: artwork)
-        } else {
+        }
+      }
+      if playingInfo.isEmpty {
+        if let thumbnailImage = thumbnailImage {
           let artwork = MPMediaItemArtwork(boundsSize: thumbnailImage.size) { _ in
-            return self.thumbnailImage
+            return thumbnailImage
           }
           playingInfo = nowPlayingInfo(title: title, songTitle: metaData, artwork: artwork)
         }
-      } else {
-        let artwork = MPMediaItemArtwork(boundsSize: thumbnailImage.size) { _ in
-          return self.thumbnailImage
-        }
-        playingInfo = nowPlayingInfo(title: title, songTitle: metaData, artwork: artwork)
       }
-      await MainActor.run {
-        if let player, let playerItem = player.currentItem {
-          playerItem.nowPlayingInfo = playingInfo
+      if !playingInfo.isEmpty {
+        let finalPlayingInfo = playingInfo
+        await MainActor.run {
+          if let player, let playerItem = player.currentItem {
+            playerItem.nowPlayingInfo = finalPlayingInfo
+          }
+          MPNowPlayingInfoCenter.default().nowPlayingInfo = finalPlayingInfo
         }
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = playingInfo
       }
     }
   }
