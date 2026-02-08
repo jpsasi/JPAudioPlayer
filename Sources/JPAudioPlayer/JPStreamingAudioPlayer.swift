@@ -10,6 +10,16 @@ import Foundation
 import AudioToolbox
 import AVFoundation
 
+public protocol JPStreamingAudioPlayerDelegate: AnyObject {
+  func streamingAudioPlayer(_ player: JPStreamingAudioPlayer,
+                            didDecode buffer: AVAudioPCMBuffer,
+                            format: AVAudioFormat)
+  func streamingAudioPlayer(_ player: JPStreamingAudioPlayer,
+                            didReceiveMetadata metadata: String)
+  func streamingAudioPlayer(_ player: JPStreamingAudioPlayer,
+                            didStopWithError error: Error?)
+}
+
 public final class JPStreamingAudioPlayer: NSObject {
   private var session: URLSession!
   private var task: URLSessionDataTask?
@@ -19,16 +29,29 @@ public final class JPStreamingAudioPlayer: NSObject {
   private var streamDataFormat: AudioFileTypeID
   private var audioConverter: AudioConverterRef?
   private var magicCookie: Data?
-  fileprivate var inputPacketDescriptions = [AudioStreamPacketDescription]()
   fileprivate var audioFormat: AudioStreamBasicDescription?
-  fileprivate var audioPacketDataQueue = [Data]()
-  fileprivate var currentInputPacket: Data?
-  fileprivate let packetQueueLock = DispatchQueue(label: "jp.player.packetqueue.lock")
-
+  private var decodedFormat: AVAudioFormat?  // 44100 Hz decoded format
+  private var outputFormat: AVAudioFormat?    // 48000 Hz output format
+  private var sampleRateConverter: AVAudioConverter?  // 44100→48000 Hz converter
+  fileprivate var packetDescriptionStorage: UnsafeMutablePointer<AudioStreamPacketDescription>?
+  struct ConverterInput {
+    var audioData: Data?
+    var packetDescriptions: [AudioStreamPacketDescription]?
+    var numberOfPackets: UInt32 = 0
+    var packetOffset: UInt32 = 0
+    var bytesPerPacket: UInt32 = 0
+  }
+  fileprivate var converterInput = ConverterInput()
+  public weak var delegate: JPStreamingAudioPlayerDelegate?
+  private let sessionQueue: OperationQueue
+  fileprivate let converterQueue = DispatchQueue(label: "jp.streaming.converter.queue", qos: .userInitiated)
+  
   public override init() {
+    sessionQueue = OperationQueue()
     streamDataFormat = kAudioFileMP3Type
     super.init()
-    session = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
+    sessionQueue.name = "jp.streaming.session.queue"
+    session = URLSession(configuration: .default, delegate: self, delegateQueue: sessionQueue)
   }
   
   public func startStreaming(url: URL) {
@@ -36,6 +59,27 @@ public final class JPStreamingAudioPlayer: NSObject {
     request.setValue("1", forHTTPHeaderField: "Icy-MetaData")
     self.task = session.dataTask(with: request)
     task?.resume()
+  }
+  
+  public func stop() {
+    task?.cancel()
+    task = nil
+    session.invalidateAndCancel()
+    session = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
+    releaeAudioConverter()
+    if let streamID = audioFileStreamID {
+      AudioFileStreamClose(streamID)
+      audioFileStreamID = nil
+    }
+    audioFormat = nil
+    outputFormat = nil
+    converterQueue.sync {
+      if let storage = packetDescriptionStorage {
+        storage.deallocate()
+        packetDescriptionStorage = nil
+      }
+      converterInput = ConverterInput()
+    }
   }
 }
 
@@ -75,7 +119,7 @@ extension JPStreamingAudioPlayer {
   func parseMetadata(_ meta: Data) {
     if let string = String(data: meta, encoding: .ascii) {
       print("Meta Data \(string)")
-      //      metadataHandler?(string)
+      delegate?.streamingAudioPlayer(self, didReceiveMetadata: string)
     }
   }
   
@@ -94,100 +138,163 @@ extension JPStreamingAudioPlayer {
         print("Parsed stream format: \(format)")
         createAudioConverter()
       }
+    } else if propertyID == kAudioFileStreamProperty_MagicCookieData {
+      // Magic cookie arrived - configure it if converter already exists
+      print("Magic cookie property available")
+      if audioConverter != nil {
+        configureMagicCookie()
+      }
     }
   }
   
-  fileprivate func decodePackets() {
+  fileprivate func decodePacketsCopied(audioData: Data,
+                                       numberOfPackets: UInt32,
+                                       packetDescriptions: [AudioStreamPacketDescription]?) {
     guard let converter = audioConverter,
-          let audioFormat = audioFormat else { return }
-    
-    let channelCount = Int(audioFormat.mChannelsPerFrame)
-    let maxOutputFrames: UInt32 = 2048
+          let outputFmt = outputFormat else { return }
 
-    while true {
-      var compressedPacket: Data?
-      packetQueueLock.sync {
-        if !audioPacketDataQueue.isEmpty {
-          compressedPacket = audioPacketDataQueue.removeFirst()
-        }
-      }
-      guard let compressedPacket else { break }
-      self.currentInputPacket = compressedPacket
-      
-      let pcmBufferSize = Int(maxOutputFrames * 2 * UInt32(channelCount))
-      let pcmData = UnsafeMutableRawPointer.allocate(byteCount: pcmBufferSize, alignment: 0)
-      
-      var audioBufferList = AudioBufferList(
-        mNumberBuffers: 1,
-        mBuffers: AudioBuffer(
-          mNumberChannels: UInt32(channelCount),
-          mDataByteSize: UInt32(pcmBufferSize),
-          mData: pcmData
-        )
+    // Set up converter input with the copied data
+    converterInput.audioData = audioData
+    converterInput.packetDescriptions = packetDescriptions
+    converterInput.numberOfPackets = numberOfPackets
+    converterInput.packetOffset = 0
+    if numberOfPackets > 0 {
+      converterInput.bytesPerPacket = max(1, UInt32(audioData.count) / numberOfPackets)
+    } else {
+      converterInput.bytesPerPacket = UInt32(audioData.count)
+    }
+
+    let maxOutputFrames: UInt32 = 4096  // Standard buffer size
+    let outputChannels = Int(outputFmt.channelCount)
+
+    // Process packets one at a time
+    while converterInput.packetOffset < converterInput.numberOfPackets {
+      // Allocate SINGLE interleaved buffer
+      let interleavedBufferSize = Int(maxOutputFrames) * outputChannels * MemoryLayout<Float>.size
+      let interleavedBuffer = UnsafeMutableRawPointer.allocate(byteCount: interleavedBufferSize, alignment: 16)
+      memset(interleavedBuffer, 0, interleavedBufferSize)
+      defer { interleavedBuffer.deallocate() }
+
+      // Create AudioBufferList for INTERLEAVED format (single buffer)
+      let bufferListSize = AudioBufferList.sizeInBytes(maximumBuffers: 1)
+      let bufferListPointer = UnsafeMutableRawPointer.allocate(byteCount: bufferListSize, alignment: MemoryLayout<AudioBufferList>.alignment)
+      defer { bufferListPointer.deallocate() }
+
+      let bufferList = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer<AudioBufferList>(OpaquePointer(bufferListPointer)))
+      bufferList.count = 1
+      bufferList[0] = AudioBuffer(
+        mNumberChannels: UInt32(outputChannels),
+        mDataByteSize: UInt32(interleavedBufferSize),
+        mData: interleavedBuffer
       )
-      
+
       var ioOutputDataPacketSize: UInt32 = maxOutputFrames
-      
+
       let status = AudioConverterFillComplexBuffer(
         converter,
         myAudioConverterComplexInputDataProc,
         Unmanaged.passUnretained(self).toOpaque(),
         &ioOutputDataPacketSize,
-        &audioBufferList,
+        bufferList.unsafeMutablePointer,
         nil
       )
-      
+
       if status != noErr {
-        print("AudioConverterFillComplexBuffer failed: \(status)")
-      } else {
-        if let pcmDataPtr = audioBufferList.mBuffers.mData {
-          let data = Data(bytes: pcmDataPtr, count: Int(audioBufferList.mBuffers.mDataByteSize))
-          schedulePCMBuffer(data)
+        if status != -1 {
+          print("AudioConverterFillComplexBuffer failed: \(status)")
         }
+        break
+      } else if ioOutputDataPacketSize > 0 {
+        guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: outputFmt,
+                                               frameCapacity: AVAudioFrameCount(ioOutputDataPacketSize)) else {
+          break
+        }
+
+        // De-interleave: AudioConverter gave us [L,R,L,R...], we need [L,L,L...][R,R,R...]
+        if let floatChannelData = pcmBuffer.floatChannelData {
+          let frameCount = Int(ioOutputDataPacketSize)
+          let interleavedFloats = interleavedBuffer.assumingMemoryBound(to: Float.self)
+
+          // De-interleave one channel at a time (cache-friendly)
+          for channel in 0..<outputChannels {
+            let channelDest = floatChannelData[channel]
+            var srcIndex = channel  // Start at channel offset
+            for frame in 0..<frameCount {
+              channelDest[frame] = interleavedFloats[srcIndex]
+              srcIndex += outputChannels  // Stride by number of channels
+            }
+          }
+
+          pcmBuffer.frameLength = AVAudioFrameCount(ioOutputDataPacketSize)
+          let durationMs = Double(frameCount) / outputFmt.sampleRate * 1000
+          print("📦 Decoded: \(frameCount) frames (\(String(format: "%.1f", durationMs))ms)")
+          delegate?.streamingAudioPlayer(self, didDecode: pcmBuffer, format: outputFmt)
+        }
+      } else {
+        break
       }
-      
-      pcmData.deallocate()
     }
+
+    // Reset converter input after processing
+    converterInput = ConverterInput()
   }
 
   private func createAudioConverter() {
     guard var inputFormat = audioFormat else { return }
-    
-    // explicitly interleaved PCM stereo 16-bit
-    var outputDesc = AudioStreamBasicDescription(
-      mSampleRate: 44100.0,
+
+    let sampleRate = inputFormat.mSampleRate  // 44100 Hz from MP3
+    let channels = inputFormat.mChannelsPerFrame
+
+    // Decode to INTERLEAVED PCM at 44100 Hz (simplest approach)
+    var converterOutputDesc = AudioStreamBasicDescription(
+      mSampleRate: sampleRate,
       mFormatID: kAudioFormatLinearPCM,
-      mFormatFlags: kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked,
-      mBytesPerPacket: 4, // 2 channels * 2 bytes
+      mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,  // INTERLEAVED
+      mBytesPerPacket: UInt32(channels) * 4,
       mFramesPerPacket: 1,
-      mBytesPerFrame: 4,   // 2 channels * 2 bytes
-      mChannelsPerFrame: 2,
-      mBitsPerChannel: 16,
+      mBytesPerFrame: UInt32(channels) * 4,
+      mChannelsPerFrame: channels,
+      mBitsPerChannel: 32,
       mReserved: 0
     )
-    
+
+    // AVAudioFormat - NON-interleaved at 44100 Hz (for AVAudioEngine EQ compatibility)
+    guard let avFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                       sampleRate: sampleRate,
+                                       channels: AVAudioChannelCount(channels),
+                                       interleaved: false) else {
+      print("Failed to create AVAudioFormat")
+      return
+    }
+
     var converter: AudioConverterRef?
-    let status = AudioConverterNew(&inputFormat, &outputDesc, &converter)
-    
+    let status = AudioConverterNew(&inputFormat, &converterOutputDesc, &converter)
+
     if status != noErr {
       print("AudioConverterNew failed: \(status)")
-    } else {
-      audioConverter = converter
-      print("AudioConverter created")
-      configureMagicCookie()
+      return
     }
+
+    audioConverter = converter
+    outputFormat = avFormat
+
+    print("AudioConverter created - Decoding to: \(sampleRate) Hz (interleaved)")
+    print("Will de-interleave for AVAudioEngine")
+    configureMagicCookie()
   }
 
   private func configureMagicCookie() {
-    guard let audioFileStreamID = audioFileStreamID else { return }
+    guard let audioFileStreamID = audioFileStreamID,
+          let converter = audioConverter else { return }
+
     var cookieSize: UInt32 = 0
-    var magicCookie: Data?
     let status = AudioFileStreamGetPropertyInfo(
       audioFileStreamID,
       kAudioFileStreamProperty_MagicCookieData,
       &cookieSize,
       nil
     )
+
     if status == noErr && cookieSize > 0 {
       var cookieData = [UInt8](repeating: 0, count: Int(cookieSize))
       let cookieStatus = AudioFileStreamGetProperty(
@@ -196,24 +303,28 @@ extension JPStreamingAudioPlayer {
         &cookieSize,
         &cookieData
       )
-      if cookieStatus == noErr {
-        magicCookie = Data(cookieData)
-        print("Magic cookie extracted of size \(cookieSize)")
-      }
-    }
 
-    if let converter = audioConverter, let cookieData = magicCookie {
-      let cookieStatus = AudioConverterSetProperty(
-        converter,
-        kAudioConverterDecompressionMagicCookie,
-        UInt32(cookieData.count),
-        (cookieData as NSData).bytes
-      )
-      if cookieStatus != noErr {
-        print("AudioConverterSetProperty(magic cookie) failed: \(cookieStatus)")
-      } else {
-        print("Magic cookie set on AudioConverter")
+      if cookieStatus == noErr {
+        let cookie = Data(cookieData)
+        self.magicCookie = cookie  // Store for later if needed
+        print("Magic cookie extracted of size \(cookieSize)")
+
+        // Set the cookie on the converter
+        let setStatus = AudioConverterSetProperty(
+          converter,
+          kAudioConverterDecompressionMagicCookie,
+          UInt32(cookie.count),
+          (cookie as NSData).bytes
+        )
+
+        if setStatus != noErr {
+          print("AudioConverterSetProperty(magic cookie) failed: \(setStatus)")
+        } else {
+          print("Magic cookie set on AudioConverter")
+        }
       }
+    } else {
+      print("Magic cookie not available yet (status: \(status), size: \(cookieSize))")
     }
   }
   
@@ -225,8 +336,6 @@ extension JPStreamingAudioPlayer {
     }
   }
   
-  private func schedulePCMBuffer(_ data: Data) {
-  }
 }
 
 fileprivate let audioPropertyListenerCallback: AudioFileStream_PropertyListenerProc = { inClientData, inAudioFileStream, inPropertyID, ioFlags in
@@ -236,26 +345,20 @@ fileprivate let audioPropertyListenerCallback: AudioFileStream_PropertyListenerP
 }
 
 fileprivate let audioPacketsListener: AudioFileStream_PacketsProc = { inClientData, inNumberBytes, inNumberPackets, inInputData, inPacketDescriptions in
-  print("audioPacketsListener")
   let player = Unmanaged<JPStreamingAudioPlayer>.fromOpaque(inClientData).takeUnretainedValue()
-  
-  guard let packetDescs = inPacketDescriptions else { return }
-  
-  for i in 0..<Int(inNumberPackets) {
-    let desc = packetDescs[i]
-    let packetData = Data(
-      bytes: inInputData.advanced(by: Int(desc.mStartOffset)),
-      count: Int(desc.mDataByteSize)
-    )
-    player.packetQueueLock.async {
-      player.audioPacketDataQueue.append(packetData)
-      player.inputPacketDescriptions.append(desc)
-    }
+
+  // Copy data immediately since pointers are only valid during callback
+  let dataCopy = Data(bytes: inInputData, count: Int(inNumberBytes))
+  var packetDescsCopy: [AudioStreamPacketDescription]?
+  if let descs = inPacketDescriptions {
+    packetDescsCopy = Array(UnsafeBufferPointer(start: descs, count: Int(inNumberPackets)))
   }
-  
-  // dispatch decode on a background thread
-  DispatchQueue.global(qos: .userInitiated).async {
-    player.decodePackets()
+
+  // Decode asynchronously to avoid blocking the audio parsing thread
+  player.converterQueue.async {
+    player.decodePacketsCopied(audioData: dataCopy,
+                               numberOfPackets: inNumberPackets,
+                               packetDescriptions: packetDescsCopy)
   }
 }
 
@@ -266,29 +369,76 @@ fileprivate func myAudioConverterComplexInputDataProc(
   outPacketDescription: UnsafeMutablePointer<UnsafeMutablePointer<AudioStreamPacketDescription>?>?,
   inUserData: UnsafeMutableRawPointer?
 ) -> OSStatus {
-  
+
   guard let inUserData else {
     ioNumberDataPackets.pointee = 0
     return -1
   }
-  
+
   let player = Unmanaged<JPStreamingAudioPlayer>.fromOpaque(inUserData).takeUnretainedValue()
-  
-  guard let packet = player.currentInputPacket else {
+
+  // No need for sync - we're already on converterQueue from the async decode call
+  guard let audioData = player.converterInput.audioData else {
     ioNumberDataPackets.pointee = 0
     return -1
   }
-  
-  // pass the data as is
-  packet.withUnsafeBytes { rawBuffer in
-    ioData.pointee.mNumberBuffers = 1
-    ioData.pointee.mBuffers.mNumberChannels = player.audioFormat?.mChannelsPerFrame ?? 2
-    ioData.pointee.mBuffers.mDataByteSize = UInt32(packet.count)
-    ioData.pointee.mBuffers.mData = UnsafeMutableRawPointer(mutating: rawBuffer.baseAddress)
+
+  let packetOffset = player.converterInput.packetOffset
+  let numberOfPackets = player.converterInput.numberOfPackets
+
+  if packetOffset >= numberOfPackets {
+    ioNumberDataPackets.pointee = 0
+    return -1
   }
-  
+
+  let bytesToCopy: UInt32
+  let startOffset: Int
+
+  // Handle packet descriptions (VBR format like MP3)
+  if let packetDescs = player.converterInput.packetDescriptions, Int(packetOffset) < packetDescs.count {
+    let desc = packetDescs[Int(packetOffset)]
+    bytesToCopy = desc.mDataByteSize
+    startOffset = Int(desc.mStartOffset)
+
+    // Allocate stable storage for packet description if needed
+    if player.packetDescriptionStorage == nil {
+      player.packetDescriptionStorage = UnsafeMutablePointer<AudioStreamPacketDescription>.allocate(capacity: 1)
+    }
+
+    // Copy and modify packet description
+    player.packetDescriptionStorage!.pointee = desc
+    player.packetDescriptionStorage!.pointee.mStartOffset = 0
+    outPacketDescription?.pointee = player.packetDescriptionStorage
+  } else {
+    // CBR format - no packet descriptions
+    bytesToCopy = player.converterInput.bytesPerPacket
+    startOffset = Int(player.converterInput.bytesPerPacket) * Int(packetOffset)
+    outPacketDescription?.pointee = nil
+  }
+
+  // Validate bounds
+  guard startOffset + Int(bytesToCopy) <= audioData.count else {
+    print("ERROR: Invalid packet bounds - offset: \(startOffset), size: \(bytesToCopy), total: \(audioData.count)")
+    ioNumberDataPackets.pointee = 0
+    return -1
+  }
+
+  // Provide data to AudioConverter
+  // Use NSData.bytes to get a stable pointer that remains valid as long as the Data is alive
+  // The Data is kept alive by converterInput.audioData
+  let nsData = audioData as NSData
+  let baseAddress = nsData.bytes.advanced(by: startOffset)
+
+  ioData.pointee.mNumberBuffers = 1
+  ioData.pointee.mBuffers.mNumberChannels = player.audioFormat?.mChannelsPerFrame ?? 2
+  ioData.pointee.mBuffers.mDataByteSize = bytesToCopy
+  ioData.pointee.mBuffers.mData = UnsafeMutableRawPointer(mutating: baseAddress)
+
   ioNumberDataPackets.pointee = 1
-  
+
+  // Increment packet offset directly (already on converterQueue)
+  player.converterInput.packetOffset += 1
+
   return noErr
 }
 
@@ -300,6 +450,22 @@ extension JPStreamingAudioPlayer: URLSessionDataDelegate {
     didReceive data: Data
   ) {
     if icyMetaInt == nil, let response = dataTask.response as? HTTPURLResponse {
+#if os(macOS)
+      if #available(macOS 10.15, *) {
+        if let metaintStr = response.value(forHTTPHeaderField: "icy-metaint"),
+           let metaint = Int(metaintStr) {
+          icyMetaInt = metaint
+          bytesUntilMeta = metaint
+        }
+        if let contentType = response.value(forHTTPHeaderField: "Content-Type") {
+          if contentType == "audio/aacp" {
+            streamDataFormat = kAudioFileAAC_ADTSType
+          } else {
+            streamDataFormat = kAudioFileMP3Type
+          }
+        }
+      }
+#else
       if let metaintStr = response.value(forHTTPHeaderField: "icy-metaint"),
          let metaint = Int(metaintStr) {
         icyMetaInt = metaint
@@ -312,6 +478,7 @@ extension JPStreamingAudioPlayer: URLSessionDataDelegate {
           streamDataFormat = kAudioFileMP3Type
         }
       }
+#endif
       openAudioFileStream()
     }
     
@@ -351,7 +518,7 @@ extension JPStreamingAudioPlayer: URLSessionDataDelegate {
     task: URLSessionTask,
     didCompleteWithError error: (any Error)?
   ) {
-    
+    delegate?.streamingAudioPlayer(self, didStopWithError: error)
   }
 }
 //public final class JPStreamingAudioPlayer: NSObject, ObservableObject {

@@ -5,8 +5,11 @@
 //  Created by Sasikumar JP on 23/07/23.
 
 import Foundation
+#if os(iOS)
+import UIKit
 import AVFoundation
 import MediaPlayer
+#endif
 
 public enum JPAudioPlayerStatus {
   case notInitialized
@@ -23,6 +26,7 @@ public protocol JPAudioPlayerDelegate: AnyObject {
   func playPreviousStation()
 }
 
+#if os(iOS)
 @Observable
 public class JPAudioPlayer: NSObject {
   var playerItem: JPAudioPlayerItem
@@ -295,3 +299,4 @@ extension JPAudioPlayer: JPSessionControllerDelegate {
     stop()
   }
 }
+#endif

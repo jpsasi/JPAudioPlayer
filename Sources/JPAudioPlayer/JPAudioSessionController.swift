@@ -6,7 +6,9 @@
 //
 
 import Foundation
+#if os(iOS)
 import AVFoundation
+#endif
 
 public protocol JPSessionControllerDelegate: AnyObject {
   func sessionControllerDidBeginInterruption()
@@ -15,6 +17,7 @@ public protocol JPSessionControllerDelegate: AnyObject {
   func sessionControllerRouteChangeNewDeviceAvailable()
 }
 
+#if os(iOS)
 public class JPAudioSessionController: NSObject {
   public weak var sessionDelegate: JPSessionControllerDelegate?
   
@@ -91,3 +94,18 @@ public class JPAudioSessionController: NSObject {
     }
   }
 }
+#else
+public class JPAudioSessionController: NSObject {
+  public weak var sessionDelegate: JPSessionControllerDelegate?
+  
+  init(sessionDelegate: JPSessionControllerDelegate? = nil) {
+    self.sessionDelegate = sessionDelegate
+  }
+  
+  public func configure() throws {
+    // macOS does not expose AVAudioSession; nothing to configure.
+  }
+  
+  public func setupAudioSessionObservers() {}
+}
+#endif

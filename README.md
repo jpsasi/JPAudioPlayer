@@ -106,3 +106,7 @@ A protocol to respond to remote control events for next and previous tracks.
 ## License
 
 This project is licensed under the MIT License. See the `LICENSE` file for details.
+
+## Contributing
+
+Check `AGENTS.md` for repository guidelines, coding style, and testing expectations before opening a pull request.
