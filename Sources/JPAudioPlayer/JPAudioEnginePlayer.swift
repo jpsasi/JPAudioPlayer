@@ -138,7 +138,6 @@ final class JPAudioEnginePipeline {
           self.accumulationBuffer = AVAudioPCMBuffer(pcmFormat: buffer.format,
                                                       frameCapacity: self.accumulationThreshold * 2)
           self.accumulationOffset = 0
-          print("📦 Created accumulation buffer: \(self.accumulationThreshold * 2) frames capacity")
         }
 
         guard let inputChannelData = buffer.floatChannelData else {
@@ -164,16 +163,12 @@ final class JPAudioEnginePipeline {
 
             self.scheduledBufferCount += 1
             self.totalBuffersScheduled += 1
-            let bufferNum = self.totalBuffersScheduled
-            let durationMs = Double(self.accumulationOffset) / buffer.format.sampleRate * 1000
-            print("⏫ Scheduled accumulated buffer #\(bufferNum) - \(self.accumulationOffset) frames (\(String(format: "%.0f", durationMs))ms) - queue: \(self.scheduledBufferCount)")
 
             self.playerNode.scheduleBuffer(accumBuffer, completionCallbackType: .dataPlayedBack) { [weak self] callbackType in
               self?.queue.async {
                 guard let self = self else { return }
                 self.scheduledBufferCount -= 1
                 self.totalBuffersConsumed += 1
-                print("⏬ Played buffer #\(bufferNum) - queue size: \(self.scheduledBufferCount)")
 
                 if self.hasStartedPlaying && self.scheduledBufferCount < 2 {
                   print("⚠️ Warning: Buffer underrun, only \(self.scheduledBufferCount) buffers remaining")
@@ -200,7 +195,6 @@ final class JPAudioEnginePipeline {
             self.accumulationOffset += framesToCopy
             sourceOffset += framesToCopy
             remainingFrames -= framesToCopy
-            print("📥 Accumulated \(framesToCopy) frames, total: \(self.accumulationOffset)/\(self.accumulationThreshold)")
           }
 
           // If we've reached exactly the threshold, schedule now
@@ -210,9 +204,6 @@ final class JPAudioEnginePipeline {
             // Schedule the accumulated buffer
             self.scheduledBufferCount += 1
             self.totalBuffersScheduled += 1
-            let bufferNum = self.totalBuffersScheduled
-            let durationMs = Double(self.accumulationOffset) / buffer.format.sampleRate * 1000
-            print("⏫ Scheduled accumulated buffer #\(bufferNum) - \(self.accumulationOffset) frames (\(String(format: "%.0f", durationMs))ms) - queue: \(self.scheduledBufferCount)")
 
             // Use .dataPlayedBack to get callback when audio is ACTUALLY played
             self.playerNode.scheduleBuffer(accumBuffer, completionCallbackType: .dataPlayedBack) { [weak self] callbackType in
@@ -220,7 +211,6 @@ final class JPAudioEnginePipeline {
                 guard let self = self else { return }
                 self.scheduledBufferCount -= 1
                 self.totalBuffersConsumed += 1
-                print("⏬ Played buffer #\(bufferNum) - queue size: \(self.scheduledBufferCount)")
 
                 // If we're running low on buffers, log it
                 if self.hasStartedPlaying && self.scheduledBufferCount < 2 {
@@ -238,14 +228,8 @@ final class JPAudioEnginePipeline {
 
         // Start playback only after we have enough buffers queued
         if !self.hasStartedPlaying && self.scheduledBufferCount >= self.minBuffersBeforePlay {
-          print("✅ Buffered \(self.scheduledBufferCount) chunks, starting playback...")
           self.hasStartedPlaying = true
           self.playerNode.play()
-
-          // Verify the actual playback format
-          print("🎵 Player node format: \(self.playerNode.outputFormat(forBus: 0).sampleRate) Hz")
-          print("🎵 Buffer format: \(buffer.format.sampleRate) Hz")
-          print("🎵 Engine output: \(self.engine.outputNode.outputFormat(forBus: 0).sampleRate) Hz")
         }
       } catch {
         print("Failed to enqueue buffer: \(error)")
@@ -296,12 +280,8 @@ final class JPAudioEnginePipeline {
     engine.disconnectNodeOutput(playerNode)
     engine.disconnectNodeOutput(eqNode)
 
-    print("🔍 Connecting nodes:")
-    print("  Audio format: \(format.sampleRate) Hz, channels: \(format.channelCount)")
-
     // Get the hardware output rate
     let outputRate = engine.outputNode.outputFormat(forBus: 0).sampleRate
-    print("  Hardware output: \(outputRate) Hz")
 
     // Connect player → EQ at input format (44100 Hz)
     engine.connect(playerNode, to: eqNode, format: format)
@@ -318,6 +298,5 @@ final class JPAudioEnginePipeline {
     currentFormat = format
 
     try engine.start()
-    print("✅ Pipeline: \(format.sampleRate) Hz → [Player→EQ→Mixer] → \(outputRate) Hz output")
   }
 }

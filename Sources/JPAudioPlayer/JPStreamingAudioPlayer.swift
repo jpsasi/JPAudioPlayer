@@ -99,8 +99,6 @@ extension JPStreamingAudioPlayer {
     )
     if status != noErr {
       print("AudioFileStreamOpen error: \(status)")
-    } else {
-      print("AudiofEinFileStreamOpen success")
     }
   }
   
@@ -137,12 +135,10 @@ extension JPStreamingAudioPlayer {
       )
       if status == noErr {
         self.audioFormat = format
-        print("Parsed stream format: \(format)")
         createAudioConverter()
       }
     } else if propertyID == kAudioFileStreamProperty_MagicCookieData {
       // Magic cookie arrived - configure it if converter already exists
-      print("Magic cookie property available")
       if audioConverter != nil {
         configureMagicCookie()
       }
@@ -209,19 +205,8 @@ extension JPStreamingAudioPlayer {
         nil
       )
 
-      print("🔧 AudioConverterFillComplexBuffer returned: status=\(status), frames=\(ioOutputDataPacketSize)")
-
       // Process frames even if status=-1 (means "no more input" but partial output is valid)
       if ioOutputDataPacketSize > 0 {
-        // Diagnostic: Check what AudioConverter actually wrote
-        if !hasLoggedFirstBuffer {
-          let ch0Float = channelBuffers[0].assumingMemoryBound(to: Float.self)
-          let ch1Float = channelBuffers[1].assumingMemoryBound(to: Float.self)
-          print("🔧 AudioConverter OUTPUT (before copy):")
-          print("   Ch0[0-3]: [\(ch0Float[0]), \(ch0Float[1]), \(ch0Float[2]), \(ch0Float[3])]")
-          print("   Ch1[0-3]: [\(ch1Float[0]), \(ch1Float[1]), \(ch1Float[2]), \(ch1Float[3])]")
-          print("   Decoded \(ioOutputDataPacketSize) frames")
-        }
         guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: outputFmt,
                                                frameCapacity: AVAudioFrameCount(ioOutputDataPacketSize)) else {
           break
@@ -247,8 +232,7 @@ extension JPStreamingAudioPlayer {
           }
 
           if !hasNonZeroSamples {
-            print("⚠️ SKIPPING silent buffer (all zeros) - \(frameCount) frames")
-            // Don't send to delegate - skip this buffer
+            // Skip silent buffer (AudioConverter priming) - don't send to delegate
           } else {
             // Copy each channel buffer directly
             for channel in 0..<outputChannels {
@@ -256,16 +240,7 @@ extension JPStreamingAudioPlayer {
             }
 
             pcmBuffer.frameLength = AVAudioFrameCount(ioOutputDataPacketSize)
-            let durationMs = Double(frameCount) / outputFmt.sampleRate * 1000
-
-            if !hasLoggedFirstBuffer {
-              print("✅ First VALID (non-zero) buffer:")
-              print("   Ch0[0-3]: [\(ch0[0]), \(ch0[1]), \(ch0[2]), \(ch0[3])]")
-              print("   Ch1[0-3]: [\(ch1[0]), \(ch1[1]), \(ch1[2]), \(ch1[3])]")
-              hasLoggedFirstBuffer = true
-            }
-
-            print("📦 Decoded: \(frameCount) frames (\(String(format: "%.1f", durationMs))ms)")
+            hasLoggedFirstBuffer = true
             delegate?.streamingAudioPlayer(self, didDecode: pcmBuffer, format: outputFmt)
           }
         }
@@ -315,16 +290,6 @@ extension JPStreamingAudioPlayer {
 
     audioConverter = converter
     outputFormat = processingFormat
-
-    // Detailed format diagnostics
-    print("✅ AudioConverter created:")
-    print("   Sample Rate: \(asbd.mSampleRate) Hz")
-    print("   Channels: \(asbd.mChannelsPerFrame)")
-    print("   Format ID: \(asbd.mFormatID)")
-    print("   Format Flags: \(asbd.mFormatFlags) (interleaved: \((asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0))")
-    print("   Bytes/Packet: \(asbd.mBytesPerPacket)")
-    print("   Bytes/Frame: \(asbd.mBytesPerFrame)")
-    print("   Bits/Channel: \(asbd.mBitsPerChannel)")
     configureMagicCookie()
   }
 
@@ -352,7 +317,6 @@ extension JPStreamingAudioPlayer {
       if cookieStatus == noErr {
         let cookie = Data(cookieData)
         self.magicCookie = cookie  // Store for later if needed
-        print("Magic cookie extracted of size \(cookieSize)")
 
         // Set the cookie on the converter
         let setStatus = AudioConverterSetProperty(
@@ -364,12 +328,8 @@ extension JPStreamingAudioPlayer {
 
         if setStatus != noErr {
           print("AudioConverterSetProperty(magic cookie) failed: \(setStatus)")
-        } else {
-          print("Magic cookie set on AudioConverter")
         }
       }
-    } else {
-      print("Magic cookie not available yet (status: \(status), size: \(cookieSize))")
     }
   }
   
@@ -384,7 +344,6 @@ extension JPStreamingAudioPlayer {
 }
 
 fileprivate let audioPropertyListenerCallback: AudioFileStream_PropertyListenerProc = { inClientData, inAudioFileStream, inPropertyID, ioFlags in
-  print("propertyListenerCallback")
   let player = Unmanaged<JPStreamingAudioPlayer>.fromOpaque(inClientData).takeUnretainedValue()
   player.handleAudioProperty(inAudioFileStream, propertyID: inPropertyID)
 }
@@ -421,11 +380,6 @@ fileprivate func myAudioConverterComplexInputDataProc(
   }
 
   let player = Unmanaged<JPStreamingAudioPlayer>.fromOpaque(inUserData).takeUnretainedValue()
-
-  // Diagnostic: Log first callback
-  if !player.hasLoggedFirstBuffer {
-    print("🔧 AudioConverter callback called (first time)")
-  }
 
   // No need for sync - we're already on converterQueue from the async decode call
   guard let audioData = player.converterInput.audioData else {
@@ -483,14 +437,6 @@ fileprivate func myAudioConverterComplexInputDataProc(
   ioData.pointee.mBuffers.mNumberChannels = player.audioFormat?.mChannelsPerFrame ?? 2
   ioData.pointee.mBuffers.mDataByteSize = bytesToCopy
   ioData.pointee.mBuffers.mData = UnsafeMutableRawPointer(mutating: baseAddress)
-
-  // Diagnostic: Check input data
-  if !player.hasLoggedFirstBuffer {
-    let samples = baseAddress.assumingMemoryBound(to: UInt8.self)
-    print("🔧 Providing to AudioConverter:")
-    print("   Bytes: \(bytesToCopy), Offset: \(startOffset)")
-    print("   First 8 bytes: [\(samples[0]), \(samples[1]), \(samples[2]), \(samples[3]), \(samples[4]), \(samples[5]), \(samples[6]), \(samples[7])]")
-  }
 
   ioNumberDataPackets.pointee = 1
 
