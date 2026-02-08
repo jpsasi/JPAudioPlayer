@@ -119,8 +119,24 @@ extension JPStreamingAudioPlayer {
   func parseMetadata(_ meta: Data) {
     if let string = String(data: meta, encoding: .ascii) {
       print("Meta Data \(string)")
-      delegate?.streamingAudioPlayer(self, didReceiveMetadata: string)
+
+      // Parse ICY metadata format: StreamTitle='Artist - Title';
+      let cleanedMetadata = extractStreamTitle(from: string)
+      delegate?.streamingAudioPlayer(self, didReceiveMetadata: cleanedMetadata)
     }
+  }
+
+  private func extractStreamTitle(from metadata: String) -> String {
+    // Look for StreamTitle='...' pattern
+    if let range = metadata.range(of: "StreamTitle='") {
+      let startIndex = range.upperBound
+      if let endRange = metadata[startIndex...].range(of: "';") {
+        let title = String(metadata[startIndex..<endRange.lowerBound])
+        return title.trimmingCharacters(in: .whitespacesAndNewlines)
+      }
+    }
+    // Fallback to original if pattern not found
+    return metadata.trimmingCharacters(in: .whitespacesAndNewlines)
   }
   
   fileprivate func handleAudioProperty(_ inAudioFileStream: AudioFileStreamID, propertyID: AudioFileStreamPropertyID) {
