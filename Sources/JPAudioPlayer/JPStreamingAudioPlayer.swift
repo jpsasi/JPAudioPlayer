@@ -45,6 +45,7 @@ public final class JPStreamingAudioPlayer: NSObject {
   fileprivate var converterInput = ConverterInput()
   public weak var delegate: JPStreamingAudioPlayerDelegate?
   private let sessionQueue: OperationQueue
+  fileprivate var hasLoggedFirstBuffer = false  // Track first buffer diagnostics (fileprivate for callback access)
   fileprivate let converterQueue = DispatchQueue(label: "jp.streaming.converter.queue", qos: .userInitiated)
   
   public override init() {
@@ -165,29 +166,37 @@ extension JPStreamingAudioPlayer {
       converterInput.bytesPerPacket = UInt32(audioData.count)
     }
 
-    let maxOutputFrames: UInt32 = 4096  // Standard buffer size
+    let maxOutputFrames: UInt32 = 4096  // Match reference implementation's smaller chunks
     let outputChannels = Int(outputFmt.channelCount)
 
     // Process packets one at a time
     while converterInput.packetOffset < converterInput.numberOfPackets {
-      // Allocate SINGLE interleaved buffer
-      let interleavedBufferSize = Int(maxOutputFrames) * outputChannels * MemoryLayout<Float>.size
-      let interleavedBuffer = UnsafeMutableRawPointer.allocate(byteCount: interleavedBufferSize, alignment: 16)
-      memset(interleavedBuffer, 0, interleavedBufferSize)
-      defer { interleavedBuffer.deallocate() }
+      // Allocate separate buffers for each channel (NON-INTERLEAVED - matching working implementation)
+      let bytesPerChannel = Int(maxOutputFrames) * MemoryLayout<Float>.size
+      var channelBuffers: [UnsafeMutableRawPointer] = []
+      for _ in 0..<outputChannels {
+        let buffer = UnsafeMutableRawPointer.allocate(byteCount: bytesPerChannel, alignment: 16)
+        memset(buffer, 0, bytesPerChannel)
+        channelBuffers.append(buffer)
+      }
+      defer {
+        channelBuffers.forEach { $0.deallocate() }
+      }
 
-      // Create AudioBufferList for INTERLEAVED format (single buffer)
-      let bufferListSize = AudioBufferList.sizeInBytes(maximumBuffers: 1)
+      // Create AudioBufferList for NON-INTERLEAVED format (matching working implementation)
+      let bufferListSize = AudioBufferList.sizeInBytes(maximumBuffers: outputChannels)
       let bufferListPointer = UnsafeMutableRawPointer.allocate(byteCount: bufferListSize, alignment: MemoryLayout<AudioBufferList>.alignment)
       defer { bufferListPointer.deallocate() }
 
       let bufferList = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer<AudioBufferList>(OpaquePointer(bufferListPointer)))
-      bufferList.count = 1
-      bufferList[0] = AudioBuffer(
-        mNumberChannels: UInt32(outputChannels),
-        mDataByteSize: UInt32(interleavedBufferSize),
-        mData: interleavedBuffer
-      )
+      bufferList.count = outputChannels
+      for i in 0..<outputChannels {
+        bufferList[i] = AudioBuffer(
+          mNumberChannels: 1,  // NON-INTERLEAVED: 1 channel per buffer
+          mDataByteSize: UInt32(bytesPerChannel),
+          mData: channelBuffers[i]
+        )
+      }
 
       var ioOutputDataPacketSize: UInt32 = maxOutputFrames
 
@@ -200,38 +209,80 @@ extension JPStreamingAudioPlayer {
         nil
       )
 
-      if status != noErr {
-        if status != -1 {
-          print("AudioConverterFillComplexBuffer failed: \(status)")
+      print("🔧 AudioConverterFillComplexBuffer returned: status=\(status), frames=\(ioOutputDataPacketSize)")
+
+      // Process frames even if status=-1 (means "no more input" but partial output is valid)
+      if ioOutputDataPacketSize > 0 {
+        // Diagnostic: Check what AudioConverter actually wrote
+        if !hasLoggedFirstBuffer {
+          let ch0Float = channelBuffers[0].assumingMemoryBound(to: Float.self)
+          let ch1Float = channelBuffers[1].assumingMemoryBound(to: Float.self)
+          print("🔧 AudioConverter OUTPUT (before copy):")
+          print("   Ch0[0-3]: [\(ch0Float[0]), \(ch0Float[1]), \(ch0Float[2]), \(ch0Float[3])]")
+          print("   Ch1[0-3]: [\(ch1Float[0]), \(ch1Float[1]), \(ch1Float[2]), \(ch1Float[3])]")
+          print("   Decoded \(ioOutputDataPacketSize) frames")
         }
-        break
-      } else if ioOutputDataPacketSize > 0 {
         guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: outputFmt,
                                                frameCapacity: AVAudioFrameCount(ioOutputDataPacketSize)) else {
           break
         }
 
-        // De-interleave: AudioConverter gave us [L,R,L,R...], we need [L,L,L...][R,R,R...]
+        // Direct copy: both AudioConverter and AVAudioPCMBuffer use NON-INTERLEAVED format
         if let floatChannelData = pcmBuffer.floatChannelData {
           let frameCount = Int(ioOutputDataPacketSize)
-          let interleavedFloats = interleavedBuffer.assumingMemoryBound(to: Float.self)
+          let bytesPerChannelToCopy = frameCount * MemoryLayout<Float>.size
 
-          // De-interleave one channel at a time (cache-friendly)
-          for channel in 0..<outputChannels {
-            let channelDest = floatChannelData[channel]
-            var srcIndex = channel  // Start at channel offset
-            for frame in 0..<frameCount {
-              channelDest[frame] = interleavedFloats[srcIndex]
-              srcIndex += outputChannels  // Stride by number of channels
+          // Check if buffer contains actual audio data (not all zeros)
+          let ch0 = channelBuffers[0].assumingMemoryBound(to: Float.self)
+          let ch1 = channelBuffers[1].assumingMemoryBound(to: Float.self)
+
+          // Sample check: look at multiple points in the buffer
+          var hasNonZeroSamples = false
+          let checkPoints = min(frameCount, 100)
+          for i in 0..<checkPoints {
+            if abs(ch0[i]) > 0.0001 || abs(ch1[i]) > 0.0001 {
+              hasNonZeroSamples = true
+              break
             }
           }
 
-          pcmBuffer.frameLength = AVAudioFrameCount(ioOutputDataPacketSize)
-          let durationMs = Double(frameCount) / outputFmt.sampleRate * 1000
-          print("📦 Decoded: \(frameCount) frames (\(String(format: "%.1f", durationMs))ms)")
-          delegate?.streamingAudioPlayer(self, didDecode: pcmBuffer, format: outputFmt)
+          if !hasNonZeroSamples {
+            print("⚠️ SKIPPING silent buffer (all zeros) - \(frameCount) frames")
+            // Don't send to delegate - skip this buffer
+          } else {
+            // Copy each channel buffer directly
+            for channel in 0..<outputChannels {
+              memcpy(floatChannelData[channel], channelBuffers[channel], bytesPerChannelToCopy)
+            }
+
+            pcmBuffer.frameLength = AVAudioFrameCount(ioOutputDataPacketSize)
+            let durationMs = Double(frameCount) / outputFmt.sampleRate * 1000
+
+            if !hasLoggedFirstBuffer {
+              print("✅ First VALID (non-zero) buffer:")
+              print("   Ch0[0-3]: [\(ch0[0]), \(ch0[1]), \(ch0[2]), \(ch0[3])]")
+              print("   Ch1[0-3]: [\(ch1[0]), \(ch1[1]), \(ch1[2]), \(ch1[3])]")
+              hasLoggedFirstBuffer = true
+            }
+
+            print("📦 Decoded: \(frameCount) frames (\(String(format: "%.1f", durationMs))ms)")
+            delegate?.streamingAudioPlayer(self, didDecode: pcmBuffer, format: outputFmt)
+          }
+        }
+
+        // If status=-1 (no more input), we've processed what we got, now break
+        // If status is a real error (not 0, not -1), log and break
+        if status == -1 {
+          break  // No more input data available, wait for next batch
+        } else if status != noErr {
+          print("❌ AudioConverterFillComplexBuffer failed: \(status)")
+          break
         }
       } else {
+        // No frames produced
+        if status != noErr && status != -1 {
+          print("❌ AudioConverterFillComplexBuffer failed: \(status)")
+        }
         break
       }
     }
@@ -243,31 +294,16 @@ extension JPStreamingAudioPlayer {
   private func createAudioConverter() {
     guard var inputFormat = audioFormat else { return }
 
-    let sourceSampleRate = inputFormat.mSampleRate
-    let targetSampleRate = preferredSampleRate ?? sourceSampleRate
-    let channels = inputFormat.mChannelsPerFrame
+    // MATCH WORKING IMPLEMENTATION: Always use 44100 Hz, 2 channels
+    let outputSampleRate: Double = 44100.0
+    let outputChannels: UInt32 = 2
 
-    // Decode to INTERLEAVED PCM at the target sample rate (resample here).
-    var converterOutputDesc = AudioStreamBasicDescription(
-      mSampleRate: targetSampleRate,
-      mFormatID: kAudioFormatLinearPCM,
-      mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,  // INTERLEAVED
-      mBytesPerPacket: UInt32(channels) * 4,
-      mFramesPerPacket: 1,
-      mBytesPerFrame: UInt32(channels) * 4,
-      mChannelsPerFrame: channels,
-      mBitsPerChannel: 32,
-      mReserved: 0
-    )
+    // AudioConverter output: Standard non-interleaved format (matching working implementation)
+    let processingFormat = AVAudioFormat(standardFormatWithSampleRate: outputSampleRate,
+                                         channels: AVAudioChannelCount(outputChannels))!
+    let asbd = processingFormat.streamDescription.pointee
 
-    // AVAudioFormat - NON-interleaved at target sample rate (for AVAudioEngine EQ compatibility)
-    guard let avFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
-                                       sampleRate: targetSampleRate,
-                                       channels: AVAudioChannelCount(channels),
-                                       interleaved: false) else {
-      print("Failed to create AVAudioFormat")
-      return
-    }
+    var converterOutputDesc = asbd
 
     var converter: AudioConverterRef?
     let status = AudioConverterNew(&inputFormat, &converterOutputDesc, &converter)
@@ -278,10 +314,17 @@ extension JPStreamingAudioPlayer {
     }
 
     audioConverter = converter
-    outputFormat = avFormat
+    outputFormat = processingFormat
 
-    print("AudioConverter created - Decoding to: \(targetSampleRate) Hz (interleaved) from \(sourceSampleRate) Hz")
-    print("Will de-interleave for AVAudioEngine")
+    // Detailed format diagnostics
+    print("✅ AudioConverter created:")
+    print("   Sample Rate: \(asbd.mSampleRate) Hz")
+    print("   Channels: \(asbd.mChannelsPerFrame)")
+    print("   Format ID: \(asbd.mFormatID)")
+    print("   Format Flags: \(asbd.mFormatFlags) (interleaved: \((asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0))")
+    print("   Bytes/Packet: \(asbd.mBytesPerPacket)")
+    print("   Bytes/Frame: \(asbd.mBytesPerFrame)")
+    print("   Bits/Channel: \(asbd.mBitsPerChannel)")
     configureMagicCookie()
   }
 
@@ -379,6 +422,11 @@ fileprivate func myAudioConverterComplexInputDataProc(
 
   let player = Unmanaged<JPStreamingAudioPlayer>.fromOpaque(inUserData).takeUnretainedValue()
 
+  // Diagnostic: Log first callback
+  if !player.hasLoggedFirstBuffer {
+    print("🔧 AudioConverter callback called (first time)")
+  }
+
   // No need for sync - we're already on converterQueue from the async decode call
   guard let audioData = player.converterInput.audioData else {
     ioNumberDataPackets.pointee = 0
@@ -435,6 +483,14 @@ fileprivate func myAudioConverterComplexInputDataProc(
   ioData.pointee.mBuffers.mNumberChannels = player.audioFormat?.mChannelsPerFrame ?? 2
   ioData.pointee.mBuffers.mDataByteSize = bytesToCopy
   ioData.pointee.mBuffers.mData = UnsafeMutableRawPointer(mutating: baseAddress)
+
+  // Diagnostic: Check input data
+  if !player.hasLoggedFirstBuffer {
+    let samples = baseAddress.assumingMemoryBound(to: UInt8.self)
+    print("🔧 Providing to AudioConverter:")
+    print("   Bytes: \(bytesToCopy), Offset: \(startOffset)")
+    print("   First 8 bytes: [\(samples[0]), \(samples[1]), \(samples[2]), \(samples[3]), \(samples[4]), \(samples[5]), \(samples[6]), \(samples[7])]")
+  }
 
   ioNumberDataPackets.pointee = 1
 

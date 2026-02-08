@@ -100,13 +100,18 @@ final class JPAudioEnginePipeline {
   private let queue = DispatchQueue(label: "jp.audio.engine.pipeline")
   var equalizerNode: AVAudioUnitEQ { eqNode }
 
+  // Accumulation buffer (like ring buffer pattern from reference implementation)
+  private var accumulationBuffer: AVAudioPCMBuffer?
+  private var accumulationOffset: AVAudioFrameCount = 0
+  private let accumulationThreshold: AVAudioFrameCount = 44100  // ~1 second buffer at 44.1kHz
+
   func outputSampleRate() -> Double {
     engine.outputNode.outputFormat(forBus: 0).sampleRate
   }
 
   // Buffering state
   private var scheduledBufferCount: Int = 0
-  private let minBuffersBeforePlay: Int = 5  // Wait for 5 buffers before starting
+  private let minBuffersBeforePlay: Int = 3  // Reduced since we're using larger accumulated buffers
   private var hasStartedPlaying: Bool = false
   private var totalBuffersScheduled: Int = 0  // Total count of all buffers ever scheduled
   private var totalBuffersConsumed: Int = 0  // Total count of all buffers consumed
@@ -119,42 +124,128 @@ final class JPAudioEnginePipeline {
   }
   
   func enqueue(buffer: AVAudioPCMBuffer) {
-    // MUST use sync to maintain buffer order (async causes overlapping audio!)
-    queue.sync {
+    // Use async with serial queue: maintains order while not blocking the decoder
+    queue.async { [weak self] in
+      guard let self = self else { return }
       do {
-        try prepareEngineIfNeeded(format: buffer.format)
+        try self.prepareEngineIfNeeded(format: buffer.format)
 
-        // Schedule buffer with completion handler to track buffer count
-        scheduledBufferCount += 1
-        totalBuffersScheduled += 1
-        let bufferNum = totalBuffersScheduled
-        print("⏫ Scheduled buffer #\(bufferNum) - queue size: \(scheduledBufferCount)")
+        // ACCUMULATION PATTERN (like reference implementation):
+        // Accumulate small decoded chunks into large buffers before scheduling
 
-        // Use .dataPlayedBack to get callback when audio is ACTUALLY played, not just consumed
-        playerNode.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] callbackType in
-          self?.queue.async {
-            guard let self = self else { return }
-            self.scheduledBufferCount -= 1
-            self.totalBuffersConsumed += 1
-            print("⏬ Played buffer #\(bufferNum) - queue size: \(self.scheduledBufferCount)")
+        // Create accumulation buffer if needed
+        if self.accumulationBuffer == nil {
+          self.accumulationBuffer = AVAudioPCMBuffer(pcmFormat: buffer.format,
+                                                      frameCapacity: self.accumulationThreshold * 2)
+          self.accumulationOffset = 0
+          print("📦 Created accumulation buffer: \(self.accumulationThreshold * 2) frames capacity")
+        }
 
-            // If we're running low on buffers, log it
-            if self.hasStartedPlaying && self.scheduledBufferCount < 2 {
-              print("⚠️ Warning: Buffer underrun, only \(self.scheduledBufferCount) buffers remaining")
+        guard let inputChannelData = buffer.floatChannelData else {
+          return
+        }
+
+        // Copy incoming buffer into accumulation buffer at current offset
+        var sourceOffset: AVAudioFrameCount = 0
+        var remainingFrames = buffer.frameLength
+
+        while remainingFrames > 0 {
+          guard let accumBuffer = self.accumulationBuffer,
+                let accumChannelData = accumBuffer.floatChannelData else {
+            return
+          }
+
+          // Check if we should schedule BEFORE copying (like reference implementation)
+          // Schedule when remaining space < incoming chunk size
+          let spaceLeft = self.accumulationThreshold - self.accumulationOffset
+          if spaceLeft < remainingFrames && self.accumulationOffset > 0 {
+            // Schedule current buffer before it overflows
+            accumBuffer.frameLength = self.accumulationOffset
+
+            self.scheduledBufferCount += 1
+            self.totalBuffersScheduled += 1
+            let bufferNum = self.totalBuffersScheduled
+            let durationMs = Double(self.accumulationOffset) / buffer.format.sampleRate * 1000
+            print("⏫ Scheduled accumulated buffer #\(bufferNum) - \(self.accumulationOffset) frames (\(String(format: "%.0f", durationMs))ms) - queue: \(self.scheduledBufferCount)")
+
+            self.playerNode.scheduleBuffer(accumBuffer, completionCallbackType: .dataPlayedBack) { [weak self] callbackType in
+              self?.queue.async {
+                guard let self = self else { return }
+                self.scheduledBufferCount -= 1
+                self.totalBuffersConsumed += 1
+                print("⏬ Played buffer #\(bufferNum) - queue size: \(self.scheduledBufferCount)")
+
+                if self.hasStartedPlaying && self.scheduledBufferCount < 2 {
+                  print("⚠️ Warning: Buffer underrun, only \(self.scheduledBufferCount) buffers remaining")
+                }
+              }
             }
+
+            // Create new accumulation buffer
+            self.accumulationBuffer = AVAudioPCMBuffer(pcmFormat: buffer.format,
+                                                        frameCapacity: self.accumulationThreshold * 2)
+            self.accumulationOffset = 0
+            continue  // Retry with new buffer
+          }
+
+          // Copy frames to accumulation buffer
+          let framesToCopy = min(remainingFrames, self.accumulationThreshold - self.accumulationOffset)
+
+          if framesToCopy > 0 {
+            for channel in 0..<Int(buffer.format.channelCount) {
+              let sourcePtr = inputChannelData[channel].advanced(by: Int(sourceOffset))
+              let destPtr = accumChannelData[channel].advanced(by: Int(self.accumulationOffset))
+              memcpy(destPtr, sourcePtr, Int(framesToCopy) * MemoryLayout<Float>.size)
+            }
+            self.accumulationOffset += framesToCopy
+            sourceOffset += framesToCopy
+            remainingFrames -= framesToCopy
+            print("📥 Accumulated \(framesToCopy) frames, total: \(self.accumulationOffset)/\(self.accumulationThreshold)")
+          }
+
+          // If we've reached exactly the threshold, schedule now
+          if self.accumulationOffset >= self.accumulationThreshold {
+            accumBuffer.frameLength = self.accumulationOffset
+
+            // Schedule the accumulated buffer
+            self.scheduledBufferCount += 1
+            self.totalBuffersScheduled += 1
+            let bufferNum = self.totalBuffersScheduled
+            let durationMs = Double(self.accumulationOffset) / buffer.format.sampleRate * 1000
+            print("⏫ Scheduled accumulated buffer #\(bufferNum) - \(self.accumulationOffset) frames (\(String(format: "%.0f", durationMs))ms) - queue: \(self.scheduledBufferCount)")
+
+            // Use .dataPlayedBack to get callback when audio is ACTUALLY played
+            self.playerNode.scheduleBuffer(accumBuffer, completionCallbackType: .dataPlayedBack) { [weak self] callbackType in
+              self?.queue.async {
+                guard let self = self else { return }
+                self.scheduledBufferCount -= 1
+                self.totalBuffersConsumed += 1
+                print("⏬ Played buffer #\(bufferNum) - queue size: \(self.scheduledBufferCount)")
+
+                // If we're running low on buffers, log it
+                if self.hasStartedPlaying && self.scheduledBufferCount < 2 {
+                  print("⚠️ Warning: Buffer underrun, only \(self.scheduledBufferCount) buffers remaining")
+                }
+              }
+            }
+
+            // Create new accumulation buffer for remaining data
+            self.accumulationBuffer = AVAudioPCMBuffer(pcmFormat: buffer.format,
+                                                        frameCapacity: self.accumulationThreshold * 2)
+            self.accumulationOffset = 0
           }
         }
 
         // Start playback only after we have enough buffers queued
-        if !hasStartedPlaying && scheduledBufferCount >= minBuffersBeforePlay {
-          print("Buffered \(scheduledBufferCount) chunks, starting playback...")
-          hasStartedPlaying = true
-          playerNode.play()
+        if !self.hasStartedPlaying && self.scheduledBufferCount >= self.minBuffersBeforePlay {
+          print("✅ Buffered \(self.scheduledBufferCount) chunks, starting playback...")
+          self.hasStartedPlaying = true
+          self.playerNode.play()
 
           // Verify the actual playback format
-          print("🎵 Player node format: \(playerNode.outputFormat(forBus: 0).sampleRate) Hz")
+          print("🎵 Player node format: \(self.playerNode.outputFormat(forBus: 0).sampleRate) Hz")
           print("🎵 Buffer format: \(buffer.format.sampleRate) Hz")
-          print("🎵 Engine output: \(engine.outputNode.outputFormat(forBus: 0).sampleRate) Hz")
+          print("🎵 Engine output: \(self.engine.outputNode.outputFormat(forBus: 0).sampleRate) Hz")
         }
       } catch {
         print("Failed to enqueue buffer: \(error)")
@@ -181,6 +272,9 @@ final class JPAudioEnginePipeline {
       hasStartedPlaying = false
       totalBuffersScheduled = 0
       totalBuffersConsumed = 0
+      // Reset accumulation buffer
+      accumulationBuffer = nil
+      accumulationOffset = 0
     }
   }
   
@@ -205,13 +299,25 @@ final class JPAudioEnginePipeline {
     print("🔍 Connecting nodes:")
     print("  Audio format: \(format.sampleRate) Hz, channels: \(format.channelCount)")
 
-    // Connect nodes using the decoded buffer format.
+    // Get the hardware output rate
+    let outputRate = engine.outputNode.outputFormat(forBus: 0).sampleRate
+    print("  Hardware output: \(outputRate) Hz")
+
+    // Connect player → EQ at input format (44100 Hz)
     engine.connect(playerNode, to: eqNode, format: format)
+
+    // Connect EQ → Mixer at input format (44100 Hz)
     engine.connect(eqNode, to: engine.mainMixerNode, format: format)
+
+    // CRITICAL: Explicitly connect Mixer → Output with proper sample rate conversion format
+    // This ensures AVAudioEngine's sample rate converter is properly configured
+    let mixerOutputFormat = AVAudioFormat(standardFormatWithSampleRate: outputRate,
+                                          channels: format.channelCount)!
+    engine.connect(engine.mainMixerNode, to: engine.outputNode, format: mixerOutputFormat)
 
     currentFormat = format
 
     try engine.start()
-    print("✅ Engine started at \(format.sampleRate) Hz")
+    print("✅ Pipeline: \(format.sampleRate) Hz → [Player→EQ→Mixer] → \(outputRate) Hz output")
   }
 }
