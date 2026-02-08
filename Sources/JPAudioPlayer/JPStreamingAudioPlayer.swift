@@ -34,6 +34,7 @@ public final class JPStreamingAudioPlayer: NSObject {
   private var outputFormat: AVAudioFormat?    // 48000 Hz output format
   private var sampleRateConverter: AVAudioConverter?  // 44100→48000 Hz converter
   fileprivate var packetDescriptionStorage: UnsafeMutablePointer<AudioStreamPacketDescription>?
+  public var preferredSampleRate: Double?
   struct ConverterInput {
     var audioData: Data?
     var packetDescriptions: [AudioStreamPacketDescription]?
@@ -242,12 +243,13 @@ extension JPStreamingAudioPlayer {
   private func createAudioConverter() {
     guard var inputFormat = audioFormat else { return }
 
-    let sampleRate = inputFormat.mSampleRate  // 44100 Hz from MP3
+    let sourceSampleRate = inputFormat.mSampleRate
+    let targetSampleRate = preferredSampleRate ?? sourceSampleRate
     let channels = inputFormat.mChannelsPerFrame
 
-    // Decode to INTERLEAVED PCM at 44100 Hz (simplest approach)
+    // Decode to INTERLEAVED PCM at the target sample rate (resample here).
     var converterOutputDesc = AudioStreamBasicDescription(
-      mSampleRate: sampleRate,
+      mSampleRate: targetSampleRate,
       mFormatID: kAudioFormatLinearPCM,
       mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,  // INTERLEAVED
       mBytesPerPacket: UInt32(channels) * 4,
@@ -258,9 +260,9 @@ extension JPStreamingAudioPlayer {
       mReserved: 0
     )
 
-    // AVAudioFormat - NON-interleaved at 44100 Hz (for AVAudioEngine EQ compatibility)
+    // AVAudioFormat - NON-interleaved at target sample rate (for AVAudioEngine EQ compatibility)
     guard let avFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
-                                       sampleRate: sampleRate,
+                                       sampleRate: targetSampleRate,
                                        channels: AVAudioChannelCount(channels),
                                        interleaved: false) else {
       print("Failed to create AVAudioFormat")
@@ -278,7 +280,7 @@ extension JPStreamingAudioPlayer {
     audioConverter = converter
     outputFormat = avFormat
 
-    print("AudioConverter created - Decoding to: \(sampleRate) Hz (interleaved)")
+    print("AudioConverter created - Decoding to: \(targetSampleRate) Hz (interleaved) from \(sourceSampleRate) Hz")
     print("Will de-interleave for AVAudioEngine")
     configureMagicCookie()
   }

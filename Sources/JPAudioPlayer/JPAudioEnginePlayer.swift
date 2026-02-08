@@ -27,6 +27,7 @@ public final class JPAudioEnginePlayer: NSObject {
   
   public func play() {
     guard let url = playerItem.playerItemType.streamURL else { return }
+    streamingPlayer.preferredSampleRate = pipeline.outputSampleRate()
     if !isSessionConfigured {
       do {
         try sessionController.configure()
@@ -98,6 +99,10 @@ final class JPAudioEnginePipeline {
   private var currentFormat: AVAudioFormat?
   private let queue = DispatchQueue(label: "jp.audio.engine.pipeline")
   var equalizerNode: AVAudioUnitEQ { eqNode }
+
+  func outputSampleRate() -> Double {
+    engine.outputNode.outputFormat(forBus: 0).sampleRate
+  }
 
   // Buffering state
   private var scheduledBufferCount: Int = 0
@@ -200,10 +205,9 @@ final class JPAudioEnginePipeline {
     print("🔍 Connecting nodes:")
     print("  Audio format: \(format.sampleRate) Hz, channels: \(format.channelCount)")
 
-    // Connect nodes at 44100 Hz - let AVAudioEngine handle conversion to 48000 Hz output
+    // Connect nodes using the decoded buffer format.
     engine.connect(playerNode, to: eqNode, format: format)
     engine.connect(eqNode, to: engine.mainMixerNode, format: format)
-    // Mixer will automatically convert to output rate (48000 Hz)
 
     currentFormat = format
 
