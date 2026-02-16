@@ -62,11 +62,8 @@ public final class JPStreamingAudioPlayer: NSObject {
     streamingLock.lock()
     defer { streamingLock.unlock() }
 
-    print("🌐 [StreamingPlayer] Starting stream: \(url)")
-
     // GUARD: Stop any existing stream first
     if isStreaming {
-      print("⚠️ [StreamingPlayer] Already streaming, stopping existing stream first")
       stopInternal()  // Internal stop without lock (we already have it)
     }
 
@@ -75,18 +72,14 @@ public final class JPStreamingAudioPlayer: NSObject {
     self.task = session.dataTask(with: request)
     task?.resume()
     isStreaming = true
-    print("🌐 [StreamingPlayer] URLSessionDataTask resumed, isStreaming = true")
   }
 
   public func stop() {
     streamingLock.lock()
     defer { streamingLock.unlock() }
 
-    print("🌐 [StreamingPlayer] stop() called")
-
     // GUARD: Prevent multiple stop calls
     guard isStreaming else {
-      print("ℹ️ [StreamingPlayer] Already stopped, ignoring")
       return
     }
 
@@ -95,13 +88,11 @@ public final class JPStreamingAudioPlayer: NSObject {
 
   private func stopInternal() {
     // Called with lock already held
-    print("🌐 [StreamingPlayer] stopInternal() executing")
     task?.cancel()
     task = nil
     session.invalidateAndCancel()
     // CRITICAL FIX: Use sessionQueue instead of .main to match init()
     session = URLSession(configuration: .default, delegate: self, delegateQueue: sessionQueue)
-    print("🌐 [StreamingPlayer] URLSession recreated with sessionQueue")
     releaeAudioConverter()
     if let streamID = audioFileStreamID {
       AudioFileStreamClose(streamID)
@@ -112,7 +103,6 @@ public final class JPStreamingAudioPlayer: NSObject {
     // CRITICAL FIX: Reset ICY metadata state to allow reopening audio stream on restart
     icyMetaInt = nil
     bytesUntilMeta = 0
-    print("🌐 [StreamingPlayer] ICY metadata state reset")
     converterQueue.sync {
       if let storage = packetDescriptionStorage {
         storage.deallocate()
@@ -121,7 +111,6 @@ public final class JPStreamingAudioPlayer: NSObject {
       converterInput = ConverterInput()
     }
     isStreaming = false
-    print("🌐 [StreamingPlayer] All streaming state cleaned up, isStreaming = false")
   }
 }
 
@@ -129,11 +118,7 @@ public final class JPStreamingAudioPlayer: NSObject {
 extension JPStreamingAudioPlayer {
   
   private func openAudioFileStream() {
-    guard audioFileStreamID == nil else {
-      print("🌐 [StreamingPlayer] Audio file stream already open")
-      return
-    }
-    print("🌐 [StreamingPlayer] Opening audio file stream")
+    guard audioFileStreamID == nil else { return }
     let status = AudioFileStreamOpen(
       Unmanaged.passUnretained(self).toOpaque(),
       audioPropertyListenerCallback,
@@ -142,9 +127,7 @@ extension JPStreamingAudioPlayer {
       &audioFileStreamID
     )
     if status != noErr {
-      print("❌ [StreamingPlayer] AudioFileStreamOpen error: \(status)")
-    } else {
-      print("✅ [StreamingPlayer] Audio file stream opened successfully")
+      print("AudioFileStreamOpen error: \(status)")
     }
   }
   
@@ -312,13 +295,11 @@ extension JPStreamingAudioPlayer {
         if status == -1 {
           break  // No more input data available, wait for next batch
         } else if status != noErr {
-          print("❌ AudioConverterFillComplexBuffer failed: \(status)")
           break
         }
       } else {
         // No frames produced
         if status != noErr && status != -1 {
-          print("❌ AudioConverterFillComplexBuffer failed: \(status)")
         }
         break
       }
@@ -346,7 +327,6 @@ extension JPStreamingAudioPlayer {
     let status = AudioConverterNew(&inputFormat, &converterOutputDesc, &converter)
 
     if status != noErr {
-      print("AudioConverterNew failed: \(status)")
       return
     }
 
@@ -515,7 +495,6 @@ extension JPStreamingAudioPlayer: URLSessionDataDelegate {
     dataTask: URLSessionDataTask,
     didReceive data: Data
   ) {
-    print("🌐 [StreamingPlayer] Received \(data.count) bytes of data")
     if icyMetaInt == nil, let response = dataTask.response as? HTTPURLResponse {
 #if os(macOS)
       if #available(macOS 10.15, *) {
@@ -554,7 +533,7 @@ extension JPStreamingAudioPlayer: URLSessionDataDelegate {
       if let metaint = icyMetaInt {
         // SAFETY: Guard against negative bytesUntilMeta from race conditions
         if bytesUntilMeta < 0 {
-          print("⚠️ [StreamingPlayer] WARNING: bytesUntilMeta is negative (\(bytesUntilMeta)), resetting to metaint")
+          // bytesUntilMeta was negative, resetting
           bytesUntilMeta = metaint
         }
 
@@ -562,7 +541,7 @@ extension JPStreamingAudioPlayer: URLSessionDataDelegate {
 
         // SAFETY: Ensure toConsume is non-negative
         guard toConsume > 0 else {
-          print("⚠️ [StreamingPlayer] WARNING: toConsume is \(toConsume), skipping")
+          // toConsume is invalid, skipping
           break
         }
 
@@ -598,11 +577,6 @@ extension JPStreamingAudioPlayer: URLSessionDataDelegate {
     task: URLSessionTask,
     didCompleteWithError error: (any Error)?
   ) {
-    if let error = error {
-      print("🌐 [StreamingPlayer] URLSession task completed with error: \(error)")
-    } else {
-      print("🌐 [StreamingPlayer] URLSession task completed successfully")
-    }
     delegate?.streamingAudioPlayer(self, didStopWithError: error)
   }
 }
@@ -898,8 +872,7 @@ extension JPStreamingAudioPlayer: URLSessionDataDelegate {
 //    let status = AudioConverterNew(&inputFormat, &outputFormat, &converter)
 //
 //    if status != noErr {
-//      print("AudioConverterNew failed: \(status)")
-//    } else {
+////    } else {
 //      audioConverter = converter
 //      print("AudioConverter created")
 //      // set cookie if available
