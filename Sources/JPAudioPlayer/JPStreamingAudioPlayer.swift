@@ -57,17 +57,22 @@ public final class JPStreamingAudioPlayer: NSObject {
   }
   
   public func startStreaming(url: URL) {
+    print("🌐 [StreamingPlayer] Starting stream: \(url)")
     var request = URLRequest(url: url)
     request.setValue("1", forHTTPHeaderField: "Icy-MetaData")
     self.task = session.dataTask(with: request)
     task?.resume()
+    print("🌐 [StreamingPlayer] URLSessionDataTask resumed")
   }
-  
+
   public func stop() {
+    print("🌐 [StreamingPlayer] stop() called")
     task?.cancel()
     task = nil
     session.invalidateAndCancel()
-    session = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
+    // CRITICAL FIX: Use sessionQueue instead of .main to match init()
+    session = URLSession(configuration: .default, delegate: self, delegateQueue: sessionQueue)
+    print("🌐 [StreamingPlayer] URLSession recreated with sessionQueue")
     releaeAudioConverter()
     if let streamID = audioFileStreamID {
       AudioFileStreamClose(streamID)
@@ -82,6 +87,7 @@ public final class JPStreamingAudioPlayer: NSObject {
       }
       converterInput = ConverterInput()
     }
+    print("🌐 [StreamingPlayer] All streaming state cleaned up")
   }
 }
 
@@ -463,12 +469,13 @@ fileprivate func myAudioConverterComplexInputDataProc(
 }
 
 extension JPStreamingAudioPlayer: URLSessionDataDelegate {
-  
+
   public func urlSession(
     _ session: URLSession,
     dataTask: URLSessionDataTask,
     didReceive data: Data
   ) {
+    print("🌐 [StreamingPlayer] Received \(data.count) bytes of data")
     if icyMetaInt == nil, let response = dataTask.response as? HTTPURLResponse {
 #if os(macOS)
       if #available(macOS 10.15, *) {
@@ -538,6 +545,11 @@ extension JPStreamingAudioPlayer: URLSessionDataDelegate {
     task: URLSessionTask,
     didCompleteWithError error: (any Error)?
   ) {
+    if let error = error {
+      print("🌐 [StreamingPlayer] URLSession task completed with error: \(error)")
+    } else {
+      print("🌐 [StreamingPlayer] URLSession task completed successfully")
+    }
     delegate?.streamingAudioPlayer(self, didStopWithError: error)
   }
 }
