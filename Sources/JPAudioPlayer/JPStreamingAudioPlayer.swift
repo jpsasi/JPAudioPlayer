@@ -80,6 +80,10 @@ public final class JPStreamingAudioPlayer: NSObject {
     }
     audioFormat = nil
     outputFormat = nil
+    // CRITICAL FIX: Reset ICY metadata state to allow reopening audio stream on restart
+    icyMetaInt = nil
+    bytesUntilMeta = 0
+    print("🌐 [StreamingPlayer] ICY metadata state reset")
     converterQueue.sync {
       if let storage = packetDescriptionStorage {
         storage.deallocate()
@@ -95,7 +99,11 @@ public final class JPStreamingAudioPlayer: NSObject {
 extension JPStreamingAudioPlayer {
   
   private func openAudioFileStream() {
-    guard audioFileStreamID == nil else { return }
+    guard audioFileStreamID == nil else {
+      print("🌐 [StreamingPlayer] Audio file stream already open")
+      return
+    }
+    print("🌐 [StreamingPlayer] Opening audio file stream")
     let status = AudioFileStreamOpen(
       Unmanaged.passUnretained(self).toOpaque(),
       audioPropertyListenerCallback,
@@ -104,7 +112,9 @@ extension JPStreamingAudioPlayer {
       &audioFileStreamID
     )
     if status != noErr {
-      print("AudioFileStreamOpen error: \(status)")
+      print("❌ [StreamingPlayer] AudioFileStreamOpen error: \(status)")
+    } else {
+      print("✅ [StreamingPlayer] Audio file stream opened successfully")
     }
   }
   
