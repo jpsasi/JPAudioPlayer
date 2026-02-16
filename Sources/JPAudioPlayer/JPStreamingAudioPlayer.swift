@@ -522,14 +522,27 @@ extension JPStreamingAudioPlayer: URLSessionDataDelegate {
     var buffer = data
     while !buffer.isEmpty {
       if let metaint = icyMetaInt {
+        // SAFETY: Guard against negative bytesUntilMeta from race conditions
+        if bytesUntilMeta < 0 {
+          print("⚠️ [StreamingPlayer] WARNING: bytesUntilMeta is negative (\(bytesUntilMeta)), resetting to metaint")
+          bytesUntilMeta = metaint
+        }
+
         let toConsume = min(buffer.count, bytesUntilMeta)
+
+        // SAFETY: Ensure toConsume is non-negative
+        guard toConsume > 0 else {
+          print("⚠️ [StreamingPlayer] WARNING: toConsume is \(toConsume), skipping")
+          break
+        }
+
         let audioData = buffer.prefix(toConsume)
-        
+
         processAudioData(audioData)
-        
+
         buffer.removeFirst(toConsume)
         bytesUntilMeta -= toConsume
-        
+
         if bytesUntilMeta == 0 {
           guard !buffer.isEmpty else { break }
           let metaLengthByte = buffer.first!
