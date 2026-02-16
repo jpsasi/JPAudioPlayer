@@ -74,21 +74,21 @@ extension JPAudioEnginePlayer: JPStreamingAudioPlayerDelegate {
 
 extension JPAudioEnginePlayer: JPSessionControllerDelegate {
   public func sessionControllerDidBeginInterruption() {
-    pause()
+    stop()  // Stop network stream to prevent accumulating stale audio data
   }
-  
+
   public func sessionControllerDidEndInterruption(canResume: Bool) {
     if canResume {
-      play()
+      play()  // Reconnect and resume from current live position
     }
   }
-  
+
   public func sessionControllerRouteChangeOldDeviceNotAvailable() {
-    pause()
+    stop()  // Stop when audio device disconnected (e.g., headphones unplugged)
   }
-  
+
   public func sessionControllerRouteChangeNewDeviceAvailable() {
-    play()
+    play()  // Resume when new audio device connected
   }
 }
 
