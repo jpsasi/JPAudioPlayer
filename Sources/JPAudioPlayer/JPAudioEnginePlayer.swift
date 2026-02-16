@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 
+@Observable
 public final class JPAudioEnginePlayer: NSObject {
   private let playerItem: JPAudioPlayerItem
   private let streamingPlayer: JPStreamingAudioPlayer
