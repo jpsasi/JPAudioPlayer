@@ -87,6 +87,8 @@ extension JPAudioEnginePlayer: JPSessionControllerDelegate {
         print("Failed to reactivate audio session after interruption: \(error)")
       }
       play()  // Reconnect and resume from current live position
+    } else {
+      stop()  // System indicates playback can't resume
     }
   }
 
