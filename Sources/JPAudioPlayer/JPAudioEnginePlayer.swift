@@ -80,6 +80,12 @@ extension JPAudioEnginePlayer: JPSessionControllerDelegate {
 
   public func sessionControllerDidEndInterruption(canResume: Bool) {
     if canResume {
+      // Reactivate audio session after interruption
+      do {
+        try sessionController.configure()
+      } catch {
+        print("Failed to reactivate audio session after interruption: \(error)")
+      }
       play()  // Reconnect and resume from current live position
     }
   }
