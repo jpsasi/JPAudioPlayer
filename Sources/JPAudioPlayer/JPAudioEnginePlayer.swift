@@ -27,29 +27,47 @@ public final class JPAudioEnginePlayer: NSObject {
   }
   
   public func play() {
-    guard let url = playerItem.playerItemType.streamURL else { return }
+    print("🎵 [JPAudioEnginePlayer] play() called - Current status: \(playerStatus)")
+    guard let url = playerItem.playerItemType.streamURL else {
+      print("❌ [JPAudioEnginePlayer] No stream URL available")
+      return
+    }
+
     streamingPlayer.preferredSampleRate = pipeline.outputSampleRate()
+    print("🎵 [JPAudioEnginePlayer] Output sample rate: \(pipeline.outputSampleRate())")
+
     if !isSessionConfigured {
+      print("🎵 [JPAudioEnginePlayer] Configuring audio session...")
       do {
         try sessionController.configure()
         isSessionConfigured = true
+        print("✅ [JPAudioEnginePlayer] Audio session configured successfully")
       } catch {
-        print("Failed to configure audio session: \(error)")
+        print("❌ [JPAudioEnginePlayer] Failed to configure audio session: \(error)")
       }
+    } else {
+      print("ℹ️ [JPAudioEnginePlayer] Audio session already configured")
     }
+
     playerStatus = .buffering
+    print("🎵 [JPAudioEnginePlayer] Status changed to: buffering")
+    print("🎵 [JPAudioEnginePlayer] Starting stream: \(url)")
     streamingPlayer.startStreaming(url: url)
   }
-  
+
   public func pause() {
+    print("⏸️ [JPAudioEnginePlayer] pause() called")
     pipeline.pause()
     playerStatus = .paused
+    print("⏸️ [JPAudioEnginePlayer] Status changed to: paused")
   }
-  
+
   public func stop() {
+    print("⏹️ [JPAudioEnginePlayer] stop() called - Current status: \(playerStatus)")
     streamingPlayer.stop()
     pipeline.stop()
     playerStatus = .stopped
+    print("⏹️ [JPAudioEnginePlayer] Status changed to: stopped")
   }
 }
 
@@ -57,46 +75,64 @@ extension JPAudioEnginePlayer: JPStreamingAudioPlayerDelegate {
   public func streamingAudioPlayer(_ player: JPStreamingAudioPlayer,
                                    didDecode buffer: AVAudioPCMBuffer,
                                    format: AVAudioFormat) {
+    print("🔊 [JPAudioEnginePlayer] Received decoded buffer: \(buffer.frameLength) frames")
     pipeline.enqueue(buffer: buffer)
-    playerStatus = .playing
+    if playerStatus != .playing {
+      playerStatus = .playing
+      print("▶️ [JPAudioEnginePlayer] Status changed to: playing")
+    }
   }
-  
+
   public func streamingAudioPlayer(_ player: JPStreamingAudioPlayer,
                                    didReceiveMetadata metadata: String) {
+    print("📝 [JPAudioEnginePlayer] Metadata received: \(metadata)")
     metadataHandler?(metadata)
   }
-  
+
   public func streamingAudioPlayer(_ player: JPStreamingAudioPlayer,
                                    didStopWithError error: Error?) {
+    if let error = error {
+      print("❌ [JPAudioEnginePlayer] Streaming stopped with error: \(error)")
+    } else {
+      print("⏹️ [JPAudioEnginePlayer] Streaming stopped normally")
+    }
     pipeline.stop()
     playerStatus = error == nil ? .stopped : .failed
+    print("⏹️ [JPAudioEnginePlayer] Status changed to: \(playerStatus)")
   }
 }
 
 extension JPAudioEnginePlayer: JPSessionControllerDelegate {
   public func sessionControllerDidBeginInterruption() {
+    print("🔴 [INTERRUPTION] Interruption began - Stopping playback")
     stop()  // Stop network stream to prevent accumulating stale audio data
   }
 
   public func sessionControllerDidEndInterruption(canResume: Bool) {
+    print("🟢 [INTERRUPTION] Interruption ended - canResume: \(canResume)")
     if canResume {
+      print("🟢 [INTERRUPTION] Attempting to reactivate audio session and resume playback")
       // Reactivate audio session after interruption
       do {
         try sessionController.configure()
+        print("✅ [INTERRUPTION] Audio session reactivated successfully")
       } catch {
-        print("Failed to reactivate audio session after interruption: \(error)")
+        print("❌ [INTERRUPTION] Failed to reactivate audio session: \(error)")
       }
       play()  // Reconnect and resume from current live position
     } else {
+      print("⏹️ [INTERRUPTION] System says cannot resume - stopping")
       stop()  // System indicates playback can't resume
     }
   }
 
   public func sessionControllerRouteChangeOldDeviceNotAvailable() {
+    print("🔌 [ROUTE CHANGE] Old device unavailable - Stopping playback")
     stop()  // Stop when audio device disconnected (e.g., headphones unplugged)
   }
 
   public func sessionControllerRouteChangeNewDeviceAvailable() {
+    print("🔌 [ROUTE CHANGE] New device available - Resuming playback")
     play()  // Resume when new audio device connected
   }
 }
@@ -137,6 +173,7 @@ final class JPAudioEnginePipeline {
     queue.async { [weak self] in
       guard let self = self else { return }
       do {
+        print("🔧 [Pipeline] Enqueuing buffer with \(buffer.frameLength) frames")
         try self.prepareEngineIfNeeded(format: buffer.format)
 
         // ACCUMULATION PATTERN (like reference implementation):
@@ -237,8 +274,10 @@ final class JPAudioEnginePipeline {
 
         // Start playback only after we have enough buffers queued
         if !self.hasStartedPlaying && self.scheduledBufferCount >= self.minBuffersBeforePlay {
+          print("▶️ [Pipeline] Starting playback - \(self.scheduledBufferCount) buffers queued")
           self.hasStartedPlaying = true
           self.playerNode.play()
+          print("✅ [Pipeline] PlayerNode.play() called successfully")
         }
       } catch {
         print("Failed to enqueue buffer: \(error)")
@@ -247,15 +286,20 @@ final class JPAudioEnginePipeline {
   }
   
   func pause() {
+    print("⏸️ [Pipeline] Pausing playback")
     queue.sync {
       playerNode.pause()
+      print("⏸️ [Pipeline] PlayerNode paused")
     }
   }
-  
+
   func stop() {
+    print("⏹️ [Pipeline] Stopping playback")
     queue.sync {
       playerNode.stop()
+      print("⏹️ [Pipeline] PlayerNode stopped")
       if engine.isRunning {
+        print("⏹️ [Pipeline] Stopping audio engine")
         engine.stop()
       }
       engine.reset()
@@ -268,6 +312,7 @@ final class JPAudioEnginePipeline {
       // Reset accumulation buffer
       accumulationBuffer = nil
       accumulationOffset = 0
+      print("⏹️ [Pipeline] All state reset - hasStartedPlaying: false, buffers: 0")
     }
   }
   
@@ -275,14 +320,21 @@ final class JPAudioEnginePipeline {
     if currentFormat == nil ||
         currentFormat?.channelCount != format.channelCount ||
         currentFormat?.sampleRate != format.sampleRate {
+      print("🔧 [Pipeline] Format changed or not set - reconnecting audio graph")
       try reconnectGraph(format: format)
     } else if !engine.isRunning {
+      print("🔧 [Pipeline] Engine not running - starting it")
       try engine.start()
+      print("✅ [Pipeline] Audio engine started successfully")
+    } else {
+      print("✅ [Pipeline] Engine already running with correct format")
     }
   }
-  
+
   private func reconnectGraph(format: AVAudioFormat) throws {
+    print("🔧 [Pipeline] Reconnecting audio graph with format: \(format.sampleRate)Hz, \(format.channelCount) channels")
     if engine.isRunning {
+      print("🔧 [Pipeline] Stopping existing engine")
       engine.stop()
     }
     engine.reset()
@@ -291,6 +343,7 @@ final class JPAudioEnginePipeline {
 
     // Get the hardware output rate
     let outputRate = engine.outputNode.outputFormat(forBus: 0).sampleRate
+    print("🔧 [Pipeline] Hardware output rate: \(outputRate)Hz")
 
     // Connect player → EQ at input format (44100 Hz)
     engine.connect(playerNode, to: eqNode, format: format)
@@ -306,6 +359,8 @@ final class JPAudioEnginePipeline {
 
     currentFormat = format
 
+    print("🔧 [Pipeline] Starting audio engine")
     try engine.start()
+    print("✅ [Pipeline] Audio engine started successfully")
   }
 }
