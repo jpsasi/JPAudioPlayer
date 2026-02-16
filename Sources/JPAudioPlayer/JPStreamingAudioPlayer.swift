@@ -35,6 +35,8 @@ public final class JPStreamingAudioPlayer: NSObject {
   private var sampleRateConverter: AVAudioConverter?  // 44100→48000 Hz converter
   fileprivate var packetDescriptionStorage: UnsafeMutablePointer<AudioStreamPacketDescription>?
   public var preferredSampleRate: Double?
+  private var isStreaming: Bool = false  // Guard flag to prevent overlapping streams
+  private let streamingLock = NSLock()  // Lock for thread-safe operations
   struct ConverterInput {
     var audioData: Data?
     var packetDescriptions: [AudioStreamPacketDescription]?
@@ -57,16 +59,43 @@ public final class JPStreamingAudioPlayer: NSObject {
   }
   
   public func startStreaming(url: URL) {
+    streamingLock.lock()
+    defer { streamingLock.unlock() }
+
     print("🌐 [StreamingPlayer] Starting stream: \(url)")
+
+    // GUARD: Stop any existing stream first
+    if isStreaming {
+      print("⚠️ [StreamingPlayer] Already streaming, stopping existing stream first")
+      stopInternal()  // Internal stop without lock (we already have it)
+    }
+
     var request = URLRequest(url: url)
     request.setValue("1", forHTTPHeaderField: "Icy-MetaData")
     self.task = session.dataTask(with: request)
     task?.resume()
-    print("🌐 [StreamingPlayer] URLSessionDataTask resumed")
+    isStreaming = true
+    print("🌐 [StreamingPlayer] URLSessionDataTask resumed, isStreaming = true")
   }
 
   public func stop() {
+    streamingLock.lock()
+    defer { streamingLock.unlock() }
+
     print("🌐 [StreamingPlayer] stop() called")
+
+    // GUARD: Prevent multiple stop calls
+    guard isStreaming else {
+      print("ℹ️ [StreamingPlayer] Already stopped, ignoring")
+      return
+    }
+
+    stopInternal()
+  }
+
+  private func stopInternal() {
+    // Called with lock already held
+    print("🌐 [StreamingPlayer] stopInternal() executing")
     task?.cancel()
     task = nil
     session.invalidateAndCancel()
@@ -91,7 +120,8 @@ public final class JPStreamingAudioPlayer: NSObject {
       }
       converterInput = ConverterInput()
     }
-    print("🌐 [StreamingPlayer] All streaming state cleaned up")
+    isStreaming = false
+    print("🌐 [StreamingPlayer] All streaming state cleaned up, isStreaming = false")
   }
 }
 
