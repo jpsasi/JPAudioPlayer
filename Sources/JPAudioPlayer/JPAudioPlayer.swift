@@ -152,7 +152,6 @@ public class JPAudioPlayer: NSObject {
           if let player, let playerItem = player.currentItem {
             playerItem.nowPlayingInfo = finalPlayingInfo
           }
-          MPNowPlayingInfoCenter.default().nowPlayingInfo = finalPlayingInfo
         }
       }
     }
