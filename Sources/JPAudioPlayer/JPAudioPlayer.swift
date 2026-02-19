@@ -33,12 +33,8 @@ public class JPAudioPlayer: NSObject {
   var player: AVPlayer?
   public weak var playerDelegate: JPAudioPlayerDelegate?
   var sessionController: JPAudioSessionController?
-  let remoteCommandCenter: MPRemoteCommandCenter = MPRemoteCommandCenter.shared()
   public var metaData: String = ""
   
-  #if os(iOS)
-  var nowPlayingSession: MPNowPlayingSession?
-  #endif
   public var playerStatus: JPAudioPlayerStatus = .notInitialized
   public var statusString: String {
     switch playerStatus {
@@ -94,9 +90,6 @@ public class JPAudioPlayer: NSObject {
     playerItem.add(metaData)
     playerStatus = .buffering
     updateNowPlayingInfo()
-    activateRemoteControl()
-    self.nowPlayingSession = MPNowPlayingSession(players: [player!])
-    self.nowPlayingSession?.delegate = self
   }
   
   private func setupAudioSession() {
@@ -162,33 +155,6 @@ public class JPAudioPlayer: NSObject {
           MPNowPlayingInfoCenter.default().nowPlayingInfo = finalPlayingInfo
         }
       }
-    }
-  }
-  
-  private func activateRemoteControl() {
-    remoteCommandCenter.playCommand.addTarget { [weak self] _ in
-      self?.play()
-      return .success
-    }
-    
-    remoteCommandCenter.stopCommand.addTarget { [weak self] _ in
-      self?.stop()
-      return .success
-    }
-    
-    remoteCommandCenter.pauseCommand.addTarget { [weak self] _ in
-      self?.pause()
-      return .success
-    }
-    
-    remoteCommandCenter.nextTrackCommand.addTarget { [weak self] _ in
-      self?.playerDelegate?.playNextStation()
-      return .success
-    }
-    
-    remoteCommandCenter.previousTrackCommand.addTarget { [weak self] _ in
-      self?.playerDelegate?.playPreviousStation()
-      return .success
     }
   }
   
@@ -262,18 +228,6 @@ extension JPAudioPlayer: AVPlayerItemMetadataOutputPushDelegate {
 //        }
       }
     }
-  }
-}
-
-@available(iOS 16.0, *)
-extension JPAudioPlayer: MPNowPlayingSessionDelegate {
-
-  public func nowPlayingSessionDidChangeActive(_ nowPlayingSession: MPNowPlayingSession) {
-    print("DidChange Active")
-  }
-  
-  public func nowPlayingSessionDidChangeCanBecomeActive(_ nowPlayingSession: MPNowPlayingSession) {
-    print("Can Become Active")
   }
 }
 
