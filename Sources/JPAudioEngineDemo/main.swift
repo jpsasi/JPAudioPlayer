@@ -4,11 +4,11 @@ import JPAudioPlayer
 final class DemoController {
   private let player: JPAudioEnginePlayer
   private let commandQueue = DispatchQueue(label: "jp.demo.commands")
-  private let streamURL = URL(string: "https://a9radio1-a9media.radioca.st/stream")!
-  
+  private let streamURL = URL(string: "http://173.249.17.187:8040/stream")!
+
   init() {
     let item = JPAudioPlayerItem(playerItemType: .stream(
-      title: "A9 Radio",
+      title: "HelloFM",
       url: streamURL,
       thumbnailImageUrl: nil
     ))

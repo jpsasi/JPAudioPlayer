@@ -531,40 +531,42 @@ extension JPStreamingAudioPlayer: URLSessionDataDelegate {
     var buffer = data
     while !buffer.isEmpty {
       if let metaint = icyMetaInt {
-        // SAFETY: Guard against negative bytesUntilMeta from race conditions
         if bytesUntilMeta < 0 {
-          // bytesUntilMeta was negative, resetting
           bytesUntilMeta = metaint
         }
 
-        let toConsume = min(buffer.count, bytesUntilMeta)
-
-        // SAFETY: Ensure toConsume is non-negative
-        guard toConsume > 0 else {
-          // toConsume is invalid, skipping
-          break
-        }
-
-        let audioData = buffer.prefix(toConsume)
-
-        processAudioData(audioData)
-
-        buffer.removeFirst(toConsume)
-        bytesUntilMeta -= toConsume
-
+        // Handle metadata boundary BEFORE consuming audio bytes.
+        // If bytesUntilMeta is 0 (can carry over from previous callback when
+        // the callback ended exactly at the boundary), read the metadata block
+        // first so we never pass 0 into the toConsume calculation below.
         if bytesUntilMeta == 0 {
           guard !buffer.isEmpty else { break }
           let metaLengthByte = buffer.first!
           let metaLength = Int(metaLengthByte) * 16
           buffer.removeFirst(1)
-          
-          if metaLength > 0 && buffer.count >= metaLength {
+
+          if metaLength > 0 {
+            guard buffer.count >= metaLength else {
+              // Metadata spans callbacks — skip its bytes to avoid feeding
+              // them into the audio parser as audio data.
+              buffer.removeAll()
+              bytesUntilMeta = metaint
+              break
+            }
             let metaDataBlock = buffer.prefix(metaLength)
             parseMetadata(metaDataBlock)
             buffer.removeFirst(metaLength)
           }
           bytesUntilMeta = metaint
+          continue
         }
+
+        let toConsume = min(buffer.count, bytesUntilMeta)
+        guard toConsume > 0 else { break }
+
+        processAudioData(buffer.prefix(toConsume))
+        buffer.removeFirst(toConsume)
+        bytesUntilMeta -= toConsume
       } else {
         processAudioData(buffer)
         buffer.removeAll()
@@ -577,6 +579,11 @@ extension JPStreamingAudioPlayer: URLSessionDataDelegate {
     task: URLSessionTask,
     didCompleteWithError error: (any Error)?
   ) {
+    if let error = error {
+      print("[JPStreaming] URLSession completed with error: \(error)")
+    } else {
+      print("[JPStreaming] URLSession completed normally (server closed connection)")
+    }
     delegate?.streamingAudioPlayer(self, didStopWithError: error)
   }
 }
