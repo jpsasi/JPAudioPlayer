@@ -528,6 +528,7 @@ extension JPStreamingAudioPlayer: URLSessionDataDelegate {
       openAudioFileStream()
     }
     
+    // Brain: fix-icy-metadata-boundary-audio-stops
     var buffer = data
     while !buffer.isEmpty {
       if let metaint = icyMetaInt {
